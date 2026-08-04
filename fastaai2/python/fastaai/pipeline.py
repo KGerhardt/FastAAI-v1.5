@@ -96,11 +96,18 @@ def preprocess(
 def build_from_archive(
     root,
     mode: FilterMode = DEFAULT_FILTER,
+    only: set | None = None,
+    k: int | None = None,
+    alphabet: str | None = None,
 ) -> "_core.Database":
     """Rebuild a sealed database from an archive, with no prediction or search.
 
     Re-resolving under a different *mode* costs nothing, because the raw hits were
     stored rather than only the surviving SCPs.
+
+    *only* restricts to a set of genome names. *k* and *alphabet* override the
+    defaults — needed to reproduce FastAAI 1 exactly, which included the stop
+    codon `*` in its 21-symbol alphabet (see equivalence harness).
     """
     from .archive import genome_names, read_hits, read_models, read_proteins
 
@@ -110,6 +117,8 @@ def build_from_archive(
 
     resolved: dict[str, list[tuple[int, bytes]]] = {}
     for genome, hits in read_hits(root):
+        if only is not None and genome not in only:
+            continue
         assignment = resolve_hits(hits, mode)
         if not assignment:
             continue
@@ -122,7 +131,11 @@ def build_from_archive(
         if payload:
             resolved[genome] = payload
 
-    db = _core.Database(accessions)
+    db = _core.Database(
+        accessions,
+        k if k is not None else _core.DEFAULT_K,
+        alphabet if alphabet is not None else _core.DEFAULT_ALPHABET,
+    )
     for genome in sorted(resolved, key=lambda g: order.get(g, 1 << 30)):
         db.add_genome(genome, resolved[genome])
     db.seal()

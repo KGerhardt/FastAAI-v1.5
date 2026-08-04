@@ -16,6 +16,19 @@ import pyhmmer
 
 FilterMode = Literal["v1", "v1_alt", "rbh"]
 
+#: Which HMMER score resolves competing hits.
+#:
+#: ``sequence``   full-sequence bit score, unrounded.
+#: ``domain_v1``  best-domain bit score **rounded to 1 decimal** — what FastAAI 1
+#:                actually used (`fastaai.py:359`, `390`). The rounding is
+#:                incidental: v1 computed it to format a HMMER-style output table
+#:                and then reused the display value as the sort key. Rounding
+#:                manufactures ties, which then resolve by sort order rather than
+#:                by score, so it is not a neutral choice.
+#: ``domain``     best-domain bit score, unrounded.
+ScoreKind = Literal["sequence", "domain_v1", "domain"]
+DEFAULT_SCORE: ScoreKind = "domain_v1"
+
 #: Resolution semantics for competing protein/model assignments.
 #:
 #: ``rbh``     strict reciprocal best hit: keep (P, A) only when A is P's best
@@ -37,6 +50,8 @@ DEFAULT_FILTER: FilterMode = "v1"
 class Hit:
     protein: str
     accession: str
+    #: Score used for best-hit resolution. Which score this is matters — see
+    #: `ScoreKind` and `search_hits`.
     score: float
 
 
@@ -98,6 +113,12 @@ class ModelSet:
         return "trusted" if self.has_trusted else None
 
 
+def _text(v) -> str | None:
+    if v is None:
+        return None
+    return v.decode() if isinstance(v, bytes) else str(v)
+
+
 def _resolve(hits: list[Hit], mode: FilterMode) -> dict[str, str]:
     """Resolve competing assignments into protein -> accession."""
     # Stable sort so equal bit scores resolve deterministically. FastAAI 1 used
@@ -148,6 +169,7 @@ def search_hits(
     proteins: dict[str, str],
     models: ModelSet,
     cpus: int = 1,
+    score: ScoreKind = DEFAULT_SCORE,
 ) -> list[Hit]:
     """Every *included* hit, unfiltered.
 
@@ -171,16 +193,22 @@ def search_hits(
 
     hits: list[Hit] = []
     for top in pyhmmer.hmmsearch(models.hmms, digital, **kwargs):
-        query = getattr(top, "query", None)
-        raw = getattr(query, "accession", None) or getattr(query, "name", None)
-        if raw is None:
-            raw = getattr(top, "query_name", b"")
-        acc = raw.decode() if isinstance(raw, bytes) else str(raw)
         for hit in top:
-            if not hit.included:
+            # v1 takes the accession off the best domain's alignment rather than
+            # the TopHits query object (fastaai.py:353).
+            raw = _text(hit.best_domain.alignment.hmm_accession)
+            if raw is None:
+                q = getattr(top, "query", None)
+                raw = _text(getattr(q, "accession", None)) or _text(getattr(q, "name", None))
+            if raw is None:
                 continue
-            name = hit.name.decode() if isinstance(hit.name, bytes) else str(hit.name)
-            hits.append(Hit(name, acc, float(hit.score)))
+            if score == "sequence":
+                sc = float(hit.score)
+            elif score == "domain":
+                sc = float(hit.best_domain.alignment.domain.score)
+            else:  # domain_v1
+                sc = round(float(hit.best_domain.alignment.domain.score), 1)
+            hits.append(Hit(_text(hit.name), str(raw), sc))
 
     return hits
 
@@ -195,8 +223,9 @@ def best_hits(
     models: ModelSet,
     mode: FilterMode = DEFAULT_FILTER,
     cpus: int = 1,
+    score: ScoreKind = DEFAULT_SCORE,
 ) -> dict[str, str]:
     """Search and resolve in one step; returns accession -> protein sequence."""
-    hits = search_hits(proteins, models, cpus=cpus)
+    hits = search_hits(proteins, models, cpus=cpus, score=score)
     assignment = _resolve(hits, mode)
     return {acc: proteins[prot] for prot, acc in assignment.items()}

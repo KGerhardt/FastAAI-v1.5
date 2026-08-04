@@ -43,10 +43,11 @@ genome count:
 **17.7% off the fixed per-partition overhead.** At GTDB scale — 930k genomes in
 15 partitions of 65,536 — that is 1.42 GB → **1.17 GB** of pure addressing.
 
-> This is a deliberate divergence from v1 and will shift AAI slightly: each
-> protein loses exactly one tetramer from both the intersection and the union.
-> Flag it in the equivalence harness (§6) as an *expected* difference, alongside
-> the §1.2 filter-order choice.
+> **This is a bug fix, not a preference — see §6.3.** v1's k-merizer takes
+> `ord()` of every character with no symbol check, so it encodes `*` and `X` as
+> if they were residues. The lookup-table k-merizer that would have filtered them
+> is dead code whose index is never built. Measured cost of the correction:
+> **mean 1.58×10⁻⁴, max 1.17×10⁻³ Jaccard**, SCP sets unchanged (§6.1).
 
 **Real data is now available** at
 `C:\Users\kenji\Desktop\fastaai2\ncbi_bacilliati\genome_collections` — five
@@ -1215,32 +1216,102 @@ extraction) consume blocks directly and never need the dense form.
 
 ---
 
-## 6. Validation
+## 6. Validation — DONE, and it found a bug on each side
 
-Non-negotiable, and it comes before any optimization:
+Run: `fastaai2/tests/equivalence_v1.py <v1_results_dir> <archive_dir>`.
+120 Firmicutes genomes spanning the collection, 14,400 pairs, v1 driven through
+its own `aai_index` module.
 
-1. **Converter** from an existing FastAAI 1 `.db` to the v2 format. Two ordering
-   invariants, both silent-corruption risks if broken:
-   - The accession ordering from `generate_accessions_index()` must be preserved
-     byte-identically as the migrated model list, or accession IDs mis-map.
-   - v1's global genome index becomes the manifest **ordinal** (§3.4.1), so
-     migrated output keeps v1's row/column order. Partition and local ID are
-     assigned fresh and bear no relation to the v1 index.
-2. **Equivalence harness** — v1 Python vs v2 Rust on a real database, comparing
-   raw Jaccard (not rounded AAI) per pair.
-3. Every subsequent optimization is checked against this harness. Expected
-   divergences are only those chosen deliberately in §1.2 and §1.3, and they must
-   be enumerated and explained.
+### 6.1 Result
 
-**Cheap pre-check, before writing any Rust.** In `one_work`, preallocate a single
-`u32` accumulator of length `_nt`, count each posting list into it directly
-(skipping `flatten_cached_targets`' concatenate), and accumulate Jaccard into one
-`f64` vector instead of `vstack`ing. ~30 lines. This isolates the memory-traffic
-cost (§1.7) from the SQLite cost (§1.8) and the parallelism cost (§1.10). If it
-moves the needle substantially, the analysis above holds; if it doesn't, SQLite
-is the whole story and should be attacked first.
+| | bug-compatible (21-symbol) | shipped (20-symbol) |
+|---|---|---|
+| pairs compared | 14,400 | 14,400 |
+| **shared-SCP mismatches** | **0** | **0** |
+| max \|ΔJaccard\| | **6.4×10⁻⁵** | 1.17×10⁻³ |
+| mean \|ΔJaccard\| | **2.5×10⁻⁵** | 1.58×10⁻⁴ |
+| within v1's 4-decimal output | **99.64%** | 21.94% |
+| `(genome, accession)` k-mer counts exact | **9,430 / 9,433 (99.97%)** | — |
 
----
+**The engine is validated.** Given identical inputs it reproduces FastAAI 1 to
+within v1's own output precision, with identical SCP sets. All three residual
+k-mer-count differences are accounted for by mechanism (§6.3), not absorbed into
+a tolerance.
+
+The right-hand column is the *measured* size of correcting v1's k-merizer bug:
+**mean 1.58×10⁻⁴, max 1.17×10⁻³ Jaccard, SCP sets untouched.**
+
+### 6.2 Bug found in FastAAI 2 — translation-table selection
+
+`predict_proteins` chose whichever genetic code gave higher coding density.
+Table 4 reassigns UGA from stop to tryptophan, so genes run through codons table
+11 would terminate on and density is *almost always* marginally higher. Result:
+**table 4 was chosen for 72.8% of 2,943 Firmicutes genomes** — the mycoplasma
+code applied to ordinary Firmicutes.
+
+v1 has hysteresis (`fastaai.py:803`): table 11 is the incumbent and an
+alternative must beat it by **>10%** to win. Ported as
+`predict.TABLE_SWITCH_MARGIN`, with `select_table` factored out so the rule is
+unit-testable without running Prodigal (`tests/test_predict.py`).
+
+The failure mode is what matters: gene calls changed (2,585 vs 2,674 proteins on
+one genome, only 1,692 sequences shared), every SCP set downstream was wrong, and
+**the output looked entirely plausible** — sensible AAI values, correct symmetry,
+a believable distribution. Three full runs passed over it. Only comparison against
+a reference implementation exposed it.
+
+> **This invalidates the AAI distribution reported from the first full Firmicutes
+> run** (median 44.6%, 55% of pairs below AAI 45%): those genes were called under
+> the wrong genetic code. Engine figures — 5.41M pairs/s, symmetry, the join's
+> 1.85× — are unaffected, as they do not depend on which proteins go in.
+
+### 6.3 Bug found in FastAAI 1 — the k-merizer encodes any byte
+
+v1 has **two** k-merizers:
+
+- `unique_kmers` (`fastaai.py:1421`) resolves tetramers through a `kmer_index`
+  lookup, which by construction admits only permissible symbols. This is the
+  intended design. **`kmer_index` is never defined and the function is never
+  called** — invoking it raises `NameError`.
+- `unique_kmer_simple_key` (`fastaai.py:1139`, called at `1233`) is what runs: a
+  numpy transform taking `ord()` of every character with no symbol check.
+
+The numpy rewrite dropped the filtering the lookup table provided. Two consequences,
+both confirmed against v1's own `genome_acc_kmer_counts`:
+
+**`*` (stop).** Every protein ends in one, so every SCP carries one spurious
+tetramer. Over 4,021 stored counts the 21-symbol encoding matches 4,019 exactly
+while 20-symbol is short by exactly one on 4,017 — the window spanning the stop.
+
+**`X` (ambiguous residue).** Rarer but worse. Emulating v1's encoding reproduced
+its counts exactly on all three residual cases:
+
+| accession | length | `X` count | ours | v1 | v1-emulated |
+|---|---|---|---|---|---|
+| PF05833.11 | 487 | 1 | 477 | 481 | **481** |
+| PF01351.18 | 299 | 50 | 242 | 249 | **249** |
+| PF02601.15 | 439 | 45 | 384 | 391 | **391** |
+
+`X` comes from runs of `N` in an assembly. v1 emits `XXXX`, `LXXX` and so on as
+real tetramers — and **two unrelated genomes with N-runs share `XXXX`, scoring
+similarity from assembly gaps.** That is a false-positive mechanism, not just
+noise.
+
+FastAAI 2 treats both as out-of-alphabet: the k-mer window breaks rather than
+aliasing onto a valid code (`kmer.rs::kmers`). So all three residual differences
+are **v1 being wrong and v2 being right**, which is why they are one-directional.
+
+> Any tool reading v1 databases needs to know this: stored k-mer sets include
+> tetramers spanning stops and ambiguity codes.
+
+### 6.4 What generalises
+
+Both bugs were invisible in isolation and neither would have been found by more
+benchmarking. Each produced plausible output. The harness is cheap to re-run
+against an archive (§0.0) and should gate any change to preprocessing.
+
+The residual is now fully attributed rather than tolerated — the distinction
+that separates "validated" from "close enough".
 
 ## 7. Open questions
 
