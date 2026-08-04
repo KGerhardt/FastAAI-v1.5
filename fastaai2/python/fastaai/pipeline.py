@@ -10,7 +10,7 @@ from typing import Callable, Iterable
 import numpy as np
 
 from . import _core
-from .ingest import find_genomes, genome_name
+from .ingest import find_genomes, genome_name, looks_like_protein, read_proteins_fasta
 from .predict import predict_proteins
 from .archive import Archive
 from .search import (DEFAULT_FILTER, FilterMode, ModelSet, resolve_hits,
@@ -41,10 +41,24 @@ def preprocess_one(
     path: os.PathLike | str,
     models: ModelSet,
     mode: FilterMode = DEFAULT_FILTER,
+    input_kind: str = "auto",
 ) -> GenomeRecord:
+    """Predict (if needed) and HMM-search one input.
+
+    *input_kind* is `"genome"`, `"protein"`, or `"auto"` to guess from the
+    extension. Protein input skips Prodigal entirely — which is the whole
+    reference-build path, since GTDB ships predicted proteins and re-predicting
+    600k genomes would be ~4 s each of pure waste. Prodigal remains mandatory
+    for query genomes, which arrive as nucleotides.
+    """
     name = genome_name(path)
+    if input_kind == "auto":
+        input_kind = "protein" if looks_like_protein(path) else "genome"
     try:
-        proteins, table = predict_proteins(path)
+        if input_kind == "protein":
+            proteins, table = read_proteins_fasta(path), None
+        else:
+            proteins, table = predict_proteins(path)
         hits = search_hits(proteins, models, cpus=1)
         assignment = resolve_hits(hits, mode)
         scps = {acc: proteins[prot] for prot, acc in assignment.items()}
@@ -60,6 +74,7 @@ def preprocess(
     threads: int = 4,
     progress: Callable[[int, int, GenomeRecord], None] | None = None,
     archive_root=None,
+    input_kind: str = "auto",
 ) -> list[GenomeRecord]:
     """Predict and HMM-search every genome. Order of *paths* is preserved.
 
@@ -74,7 +89,8 @@ def preprocess(
     archive = Archive(archive_root, models.accessions) if archive_root else None
     with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
         futures = {
-            pool.submit(preprocess_one, p, models, mode): i for i, p in enumerate(paths)
+            pool.submit(preprocess_one, p, models, mode, input_kind): i
+            for i, p in enumerate(paths)
         }
         done = 0
         for fut in as_completed(futures):

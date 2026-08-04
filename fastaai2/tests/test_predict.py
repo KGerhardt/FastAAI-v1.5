@@ -68,3 +68,32 @@ def test_multiple_contigs_are_separated_and_trailed():
 
 def test_empty_input():
     assert build_training_sequence([]) == ""
+
+
+# --------------------------------------------------------- protein input
+
+def test_protein_extensions_are_recognised():
+    from fastaai.ingest import looks_like_protein
+    assert looks_like_protein("x.faa")
+    assert looks_like_protein("x.faa.gz")
+    assert looks_like_protein("GCF_000007085.1.aa")
+    assert not looks_like_protein("x.fna.gz")
+    # `.fasta` is ambiguous in practice, so the guess declines to claim it.
+    assert not looks_like_protein("x.fasta")
+
+
+def test_read_proteins_fasta_round_trip(tmp_path):
+    from fastaai.ingest import read_proteins_fasta
+    f = tmp_path / "p.faa"
+    f.write_text(">g1 some description\nMKVL\nAATT\n>g2\nPQRS\n")
+    got = read_proteins_fasta(f)
+    assert got == {"g1": "MKVLAATT", "g2": "PQRS"}, "id is the first token; lines join"
+
+
+def test_duplicate_protein_ids_are_rejected(tmp_path):
+    """Silently keeping the last would drop a marker without telling anyone."""
+    from fastaai.ingest import read_proteins_fasta
+    f = tmp_path / "dup.faa"
+    f.write_text(">g1\nMKVL\n>g1\nPQRS\n")
+    with pytest.raises(ValueError):
+        read_proteins_fasta(f)

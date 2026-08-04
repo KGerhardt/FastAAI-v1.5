@@ -199,3 +199,51 @@ def test_block_size_does_not_change_results():
         got = fastaai.search(db, db, threads=1, block=blk)
         assert np.allclose(got.jaccard, base.jaccard, equal_nan=True), f"block={blk}"
         assert (got.shared == base.shared).all(), f"block={blk}"
+
+
+# ------------------------------------------------------- direct comparison
+
+def test_compare_pair_matches_the_indexed_path():
+    """The pairwise function is the oracle for the index, so agreement between
+    them is the whole point of it existing."""
+    genomes = {
+        "g0": [(0, b"MKVLAATTGGHHWWYY"), (1, b"PQRSTVWYACDEFGHI")],
+        "g1": [(0, b"MKVLAATTGGHHWWYA"), (1, b"PQRSTVWYACDEFGHA")],
+        "g2": [(0, b"CCCCDDDDEEEEFFFF")],
+    }
+    db = fastaai.Database(["a0", "a1"])
+    for name, scps in genomes.items():
+        db.add_genome(name, scps)
+    db.seal()
+    res = fastaai.search(db, db, threads=1)
+
+    names = db.genome_names
+    for i, qn in enumerate(names):
+        for j, tn in enumerate(names):
+            mj, shared, aai = fastaai._core.compare_pair(genomes[qn], genomes[tn], 2)
+            assert shared == res.shared[i, j], f"shared {qn} vs {tn}"
+            if shared == 0:
+                assert math.isnan(mj) and math.isnan(res.jaccard[i, j])
+            else:
+                assert abs(mj - res.jaccard[i, j]) < 1e-12, f"jaccard {qn} vs {tn}"
+
+
+def test_compare_pair_self_is_one():
+    g = [(0, b"MKVLAATTGGHHWWYY"), (1, b"PQRSTVWYACDEFGHI")]
+    mj, shared, aai = fastaai._core.compare_pair(g, g, 2)
+    assert shared == 2
+    assert abs(mj - 1.0) < 1e-12
+    assert aai > 100.0  # regression is unbounded above, uncensored by design
+
+
+def test_compare_pair_no_shared_accession_is_nan():
+    a = [(0, b"MKVLAATTGGHH")]
+    b = [(1, b"PQRSTVWYACDE")]
+    mj, shared, aai = fastaai._core.compare_pair(a, b, 2)
+    assert shared == 0
+    assert math.isnan(mj) and math.isnan(aai)
+
+
+def test_compare_pair_rejects_out_of_range_accession():
+    with pytest.raises(ValueError):
+        fastaai._core.compare_pair([(5, b"MKVLAATT")], [(0, b"MKVLAATT")], 2)

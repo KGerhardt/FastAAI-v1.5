@@ -13,6 +13,7 @@ pub mod aai;
 pub mod index;
 pub mod kernel;
 pub mod kmer;
+pub mod pairwise;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -308,6 +309,46 @@ fn aai_to_jaccard(aai: f64) -> f64 {
     aai::aai_to_kaai(aai)
 }
 
+/// Compare two genomes directly, without building an index.
+///
+/// Each argument is a list of `(accession_index, protein_sequence)`. Returns
+/// `(mean_jaccard, shared_accessions, aai)`; Jaccard and AAI are NaN when the two
+/// genomes share no accession, which is not the same as similarity zero.
+///
+/// This is the honest way to do a handful of comparisons — building an index for
+/// two genomes is silly. It is also the oracle the indexed path is validated
+/// against, sharing none of its machinery.
+#[pyfunction]
+#[pyo3(signature = (query, target, n_accessions, k = kmer::DEFAULT_K, alphabet = kmer::DEFAULT_ALPHABET))]
+fn compare_pair(
+    query: Vec<(usize, Vec<u8>)>,
+    target: Vec<(usize, Vec<u8>)>,
+    n_accessions: usize,
+    k: usize,
+    alphabet: &str,
+) -> PyResult<(f64, u32, f64)> {
+    let alpha = Alphabet::new(alphabet.as_bytes(), k).map_err(PyValueError::new_err)?;
+    let mut km = Kmerizer::new(alpha);
+
+    let mut build = |scps: Vec<(usize, Vec<u8>)>| -> PyResult<Vec<Vec<u32>>> {
+        let mut out = vec![Vec::new(); n_accessions];
+        for (acc, seq) in scps {
+            if acc >= n_accessions {
+                return Err(PyValueError::new_err(format!(
+                    "accession index {acc} out of range (have {n_accessions})"
+                )));
+            }
+            out[acc] = km.kmers(&seq);
+        }
+        Ok(out)
+    };
+
+    let q = build(query)?;
+    let t = build(target)?;
+    let c = pairwise::compare(&q, &t);
+    Ok((c.mean_jaccard(), c.shared, c.aai()))
+}
+
 /// Sorted unique k-mer IDs for one sequence — exposed for testing and inspection.
 #[pyfunction]
 #[pyo3(signature = (seq, k = kmer::DEFAULT_K, alphabet = kmer::DEFAULT_ALPHABET))]
@@ -322,6 +363,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(jaccard_to_aai, m)?)?;
     m.add_function(wrap_pyfunction!(aai_to_jaccard, m)?)?;
     m.add_function(wrap_pyfunction!(kmerize, m)?)?;
+    m.add_function(wrap_pyfunction!(compare_pair, m)?)?;
     m.add("DEFAULT_ALPHABET", kmer::DEFAULT_ALPHABET)?;
     m.add("DEFAULT_K", kmer::DEFAULT_K)?;
     m.add("MAX_PARTITION", index::MAX_PARTITION)?;

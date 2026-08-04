@@ -47,6 +47,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument("--limit", type=int, help="use only the first N genomes")
+    p.add_argument(
+        "--input", dest="input_kind", choices=("auto", "genome", "protein"),
+        default="auto",
+        help=("whether inputs are nucleotide genomes or already-predicted "
+              "proteins (default: guess from extension). Protein input skips "
+              "gene prediction, which is ~80%% of preprocessing."),
+    )
     p.add_argument("--archive", metavar="DIR",
                    help="persist proteins and raw HMM hits so the run need never "
                         "repeat; re-searching a different model set then needs no "
@@ -104,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     records = preprocess(
         paths, models, mode=args.filter,
         threads=args.preprocess_threads, progress=progress,
-        archive_root=args.archive,
+        archive_root=args.archive, input_kind=args.input_kind,
     )
     if args.archive:
         from .archive import size_report
