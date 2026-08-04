@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fastaai"
+version = "2.0.0a1"
+description = "Fast whole-genome average amino acid identity from single-copy protein tetramer sketches"
+requires-python = ">=3.9"
+dependencies = [
+    "pyfastx>=2.0",
+    "pyrodigal>=3.0",
+    "pyhmmer>=0.10",
+    "numpy>=1.21",
+]
+
+[project.scripts]
+fastaai = "fastaai.cli:main"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "fastaai._core"
+python-source = "python"

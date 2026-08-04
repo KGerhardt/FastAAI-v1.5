@@ -1,0 +1,14 @@
+[package]
+name = "fastaai-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bitpacking = "0.9.3"
+stream-vbyte = "0.4.1"   # SIMD paths need nightly (portable_simd); scalar only on stable
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+debug = false

@@ -1,0 +1,29 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Upstream FastAAI 1 — a separate clone, kept locally for reference and
+# equivalence checking. Not our code; clone it from
+# https://github.com/cruizperez/FastAAI when needed.
+#
+# NOTE the leading slash. Unanchored `FastAAI/` matches a directory of that name
+# at any depth, and on a case-insensitive filesystem it also swallows
+# `fastaai2/python/fastaai/` — silently excluding the entire Python package.
+/FastAAI/
+
+# Compiled extension module (built by maturin)
+_core.abi3.so
+
+# Large run outputs and archives
+*.tsv.gz
+/firmicutes_*/
+*_results.tsv
