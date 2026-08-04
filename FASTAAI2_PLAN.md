@@ -174,30 +174,22 @@ Reference numbers actually observed, replacing earlier estimates:
 | SCPs per bacterial genome | 122 | **79–80** (rest are archaeal) |
 | mean posting-list length @16k | — | **47.8** (33% are singletons) |
 
-> ⚠ **The seed set is 10 genomes from one family, and it biases two parameters.**
+> ⚠ **Seed-set caveats — RESOLVED against 2,943 real Firmicutes.** Both were
+> checked once real data existed, and both came out differently than assumed:
 >
-> 1. **SCP length.** The recovered SCPs skew short (median 162 aa, mean 197
->    tetramers). A representative figure is **~330 distinct tetramers per SCP**
->    with a long tail. Throughput in §4.2/§4.5 is therefore **optimistic by
->    ~1.7–2.1×**; see §4.5.2 for what this does and does not change.
-> 2. **Tetramer-space occupancy.** The synthetic scale-up reaches only 35.6% of
->    the 194,481 tetramer slots at 65,536 genomes. Real databases run **well north
->    of 50%** — most tetramers occupied, some common, some rare. This is the
->    parameter that decides the §3.5 index encoding, and 50% is exactly the
->    dense/sparse break-even.
+> 1. **SCP length — no correction needed.** Real: mean **194** tetramers/SCP,
+>    median 145 (p90 407, max 2,155). The seed set's 197 was accurate. The
+>    ~1.7–2.1× pessimism factor previously applied to every throughput
+>    projection in this document was unwarranted and is **withdrawn** — the
+>    uncorrected figures stand.
+> 2. **Tetramer occupancy — far lower than either estimate.** Real: **15.8%**
+>    overall, mean 18.2% per accession, median 12.6%; only 8 of 106 accessions
+>    exceed 50%. Synthetic said 35.6% and was *overstating*. This reverses the
+>    §3.5 encoding decision — see there.
 >
-> Neither bias affects correctness, which is validated on real data. Both affect
-> absolute performance figures, and neither reverses a structural conclusion.
-> A phylum-spanning seed set would fix both, plus the Jaccard-range limitation
-> (§6), in one go.
-
-> **Benchmark methodology warning.** Synthetic scale-up must mutate **residues and
-> re-kmerize**, never resample kmer IDs. An earlier version resampled IDs from the
-> tetramer pool of the 10 seed genomes — that pool holds only ~183 tetramers per
-> accession, so a 16,384-genome partition collapsed to 22,337 distinct
-> (accession, kmer) pairs with mean list length **8,123** instead of 47.8. Every
-> codec and cache result measured on that data was an artifact and had to be
-> re-run. `src/synth.rs` documents the failure mode.
+> The one genuine seed-set limitation that remains is Jaccard range: the bundled
+> genomes span 0.52–1.00 and never reach the distant regime, where real
+> Firmicutes sit at a median of 0.089.
 
 ---
 
@@ -725,7 +717,21 @@ in a partition, let `f` = fraction of the `K` tetramer slots that are occupied:
 | bitmap + rank — occupancy bitmap + offsets | `K/8 + 4fK` | **413 KB** |
 
 Naive sparse breaks even against dense at **exactly `f` = 0.5**, and is strictly
-worse above it. Real databases are expected to run **well north of 50% tetramer
+worse above it.
+
+> **MEASURED — real occupancy is 15.8%, so sparse wins decisively.** Over 2,943
+> Firmicutes with corrected gene calls: mean 18.2% per accession, median 12.6%,
+> only 8 of 106 accessions above 50%. At `f` ≈ 0.16 naive sparse costs ~0.32×
+> dense and bitmap+rank ~0.29×, so the 78.1 MB per-partition offsets array can be
+> roughly **3× smaller** — and the saving is largest exactly where offsets
+> dominate.
+>
+> **This reverses the conclusion recorded immediately below**, which assumed the
+> >50% occupancy estimate and concluded dense won outright. Caveat: one phylum at
+> 2,943 genomes. Occupancy rises with diversity and count, but the synthetic
+> extrapolation to 35.6% is now the least trustworthy of the three figures, so
+> the crossover must be measured on real multi-phylum data before the format is
+> frozen — not projected. Real databases are expected to run **well north of 50% tetramer
 occupancy** — some tetramers common, some rare, most occupied — so at the default
 `k` = 4 the naive sparse encoding is the wrong tool for a full partition and
 **dense is correct at the cap**.
