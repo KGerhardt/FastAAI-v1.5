@@ -30,9 +30,14 @@ import fastaai
 
 models = fastaai.ModelSet("models.hmm")
 paths  = fastaai.find_genomes("/path/to/genomes")
-records = fastaai.preprocess(paths, models, threads=8)
+
+# Preprocessing is >98% of a cold run — archive it so it is paid once.
+records = fastaai.preprocess(paths, models, threads=8, archive_root="arch/")
 db, skipped = fastaai.build_database(records, models)
 res = fastaai.search(db, db, threads=8)
+
+# Later: rebuild in seconds, no prediction or HMM search.
+db = fastaai.build_from_archive("arch/")
 
 res.jaccard   # (n, n) float64, NaN where no accession is shared
 res.shared    # (n, n) uint32, accessions carried by both genomes
@@ -77,13 +82,21 @@ alternatives behind each decision:
 |---|---|
 | counting kernel | ~0.53 ns per posting increment (~1.8 cycles) |
 | vs FastAAI 1's numpy kernel | **6.5× per core**, with SQLite already removed from v1's side |
-| throughput | ~1.09M genome pairs/s/thread; 6.75M pairs/s at 16 threads |
+| real 2,943-genome index, 8 threads | **5.34M genome pairs/s** — 8.66M pairs in 1.6 s |
+
+The kernel is a k-mer join reading both sides as inverted indexes. On real data it
+is 1.50× the superseded per-query kernel, 1.85× with the symmetric upper-triangle
+path; the per-query kernel is in git history.
 
 Variants measured and rejected: L1 tiling (0.83×), delta+varint payloads (0.43×),
-query batching (0.96×), private accumulators (0.85×), software prefetch (0.73×),
-narrow counters (noise). `bitpacking::BitPacker4x` wins at full partition size and
-high thread count (1.18× faster, 1.36× smaller) and is the one deferred
-optimisation worth revisiting.
+private accumulators (0.85×), software prefetch (0.73×), narrow counters (noise).
+`bitpacking::BitPacker4x` wins at full partition size and high thread count
+(1.18× faster, 1.36× smaller) and is the one deferred optimisation worth revisiting.
+
+**Synthetic benchmarks pointed the wrong way three times in this project** — most
+sharply on the join, which synthetic sequences rated 0.96× and real genomes 1.50×.
+Random sequences have no k-mer sharing structure, and sharing is what the kernel
+exploits. Benchmark against an archive of real genomes.
 
 The single load-bearing invariant is that **posting lists are sorted by local
 genome ID**, which makes the accumulator a monotone sweep rather than a random
@@ -91,6 +104,6 @@ scatter. Every variant that disturbed it lost.
 
 ## Status
 
-Alpha. Working end to end, in memory, single partition (cap 65,536 genomes).
+Alpha. Working end to end, in memory, partitioned at 16,384 genomes.
 Not yet implemented: on-disk partition format, genome manifest, block scheduler
 and resumable block outputs. See `../FASTAAI2_PLAN.md`.

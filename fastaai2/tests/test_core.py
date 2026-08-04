@@ -168,56 +168,34 @@ def test_aai_is_uncensored():
 
 # ------------------------------------------------- targets-only databases
 
-def test_seal_drops_forward_index_by_default():
-    """A stored partition needs only the inverted index — ~36% of full size, and
-    the difference between 34 GB and 95 GB at GTDB scale."""
+def test_seal_drops_the_forward_index():
+    """A stored partition holds only the inverted index — ~36% of the full size,
+    and the difference between 34 GB and 95 GB at GTDB scale. Nothing downstream
+    reads the forward sets: the join takes both sides inverted."""
     db = fastaai.Database(["a0", "a1"])
     db.add_genome("g0", [(0, b"MKVLAATTGGHH"), (1, b"PQRSTVWYACDE")])
     db.seal()
     assert db.is_sealed
-    assert not db.has_forward
+    assert db.index_bytes() > 0
 
 
-def test_keep_forward_retains_it():
-    db = fastaai.Database(["a0"])
-    db.add_genome("g0", [(0, b"MKVLAATTGGHH")])
-    db.seal(keep_forward=True)
-    assert db.has_forward
+def test_scp_counts_come_from_the_inverted_index():
+    db = fastaai.Database(["a0", "a1"])
+    db.add_genome("both", [(0, b"MKVLAATTGGHH"), (1, b"PQRSTVWYACDE")])
+    db.add_genome("one", [(0, b"MKVLAATTGGHH")])
+    db.seal()
+    assert db.scp_counts() == [2, 1]
 
 
-def test_targets_only_database_can_still_query():
-    """The forward index is rebuilt from the inverted one on demand, so a
-    targets-only artifact is closed under search."""
-    genomes = {
-        "g0": [(0, "MKVLAATTGGHHWWYY"), (1, "PQRSTVWYACDEFGHI")],
-        "g1": [(0, "MKVLAATTGGHHWWYA"), (1, "PQRSTVWYACDEFGHA")],
-        "g2": [(0, "CCCCDDDDEEEEFFFF")],
-    }
-
-    kept = fastaai.Database(["a0", "a1"])
-    dropped = fastaai.Database(["a0", "a1"])
-    for name, scps in genomes.items():
-        payload = [(i, s.encode()) for i, s in scps]
-        kept.add_genome(name, payload)
-        dropped.add_genome(name, payload)
-    kept.seal(keep_forward=True)
-    dropped.seal()
-
-    a = fastaai.search(kept, kept, threads=1)
-    b = fastaai.search(dropped, dropped, threads=1)
-    assert np.allclose(a.jaccard, b.jaccard, equal_nan=True)
-    assert (a.shared == b.shared).all()
-
-
-def test_scp_counts_survive_dropping_the_forward_index():
-    genomes = {"both": [(0, "MKVLAATTGGHH"), (1, "PQRSTVWYACDE")],
-               "one": [(0, "MKVLAATTGGHH")]}
-    kept = fastaai.Database(["a0", "a1"])
-    dropped = fastaai.Database(["a0", "a1"])
-    for name, scps in genomes.items():
-        payload = [(i, s.encode()) for i, s in scps]
-        kept.add_genome(name, payload)
-        dropped.add_genome(name, payload)
-    kept.seal(keep_forward=True)
-    dropped.seal()
-    assert kept.scp_counts() == dropped.scp_counts() == [2, 1]
+def test_block_size_does_not_change_results():
+    """Blocking is a memory-budget knob, never a numerical one."""
+    db = fastaai.Database(["a0", "a1"])
+    for i in range(20):
+        db.add_genome(f"g{i}", [(0, ("MKVLAATTGGHH" + "A" * i).encode()),
+                                (1, ("PQRSTVWYACDE" + "C" * i).encode())])
+    db.seal()
+    base = fastaai.search(db, db, threads=1, block=1)
+    for blk in (2, 7, 64, 4096):
+        got = fastaai.search(db, db, threads=1, block=blk)
+        assert np.allclose(got.jaccard, base.jaccard, equal_nan=True), f"block={blk}"
+        assert (got.shared == base.shared).all(), f"block={blk}"

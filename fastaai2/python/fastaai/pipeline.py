@@ -96,7 +96,6 @@ def preprocess(
 def build_from_archive(
     root,
     mode: FilterMode = DEFAULT_FILTER,
-    keep_forward: bool = False,
 ) -> "_core.Database":
     """Rebuild a sealed database from an archive, with no prediction or search.
 
@@ -126,7 +125,7 @@ def build_from_archive(
     db = _core.Database(accessions)
     for genome in sorted(resolved, key=lambda g: order.get(g, 1 << 30)):
         db.add_genome(genome, resolved[genome])
-    db.seal(keep_forward=keep_forward)
+    db.seal()
     return db
 
 
@@ -178,12 +177,21 @@ class SearchResult:
         return out
 
 
+#: Query-blocking width. The accumulator is `block * n_target`; 128 keeps it in
+#: L2 on typical hardware, and the measured cliff between 256 and 512 is that
+#: accumulator leaving cache.
+DEFAULT_BLOCK = 128
+
+
 def search(
     query: "_core.Database",
     target: "_core.Database",
     threads: int = DEFAULT_SEARCH_THREADS,
+    block: int = DEFAULT_BLOCK,
 ) -> SearchResult:
-    jb, sb, nq, nt = query.search(target, threads)
+    """Search via the k-mer join. Passing the same database twice takes the
+    symmetric upper-triangle path automatically."""
+    jb, sb, nq, nt = query.search(target, block, threads)
     jac = np.frombuffer(jb, dtype=np.float64).reshape(nq, nt)
     sh = np.frombuffer(sb, dtype=np.uint32).reshape(nq, nt)
     return SearchResult(query.genome_names, target.genome_names, jac, sh)

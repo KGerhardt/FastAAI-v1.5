@@ -107,42 +107,6 @@ impl Partition {
         Ok(Partition { n_genomes, n_acc, kspace, accs })
     }
 
-    /// Rebuild the forward index — `[genome][accession] -> sorted k-mer IDs` —
-    /// from the inverted one.
-    ///
-    /// This is what lets a **targets-only** database still act as a query source.
-    /// A stored partition holds the inverted index alone (~36% of the full size);
-    /// the forward form is derived on demand rather than stored, which at GTDB
-    /// scale is the difference between 34 GB and 95 GB.
-    ///
-    /// Output lists come out sorted for free because `k` ascends in the outer
-    /// loop. Cost is one pass over `kspace` offsets plus one over every posting
-    /// entry, per accession.
-    ///
-    /// Memory: the result is ~2x the partition it came from (k-mer IDs are `u32`
-    /// where postings are `u16`), so transpose one partition at a time.
-    pub fn to_forward(&self) -> Vec<Vec<Vec<u32>>> {
-        let mut out: Vec<Vec<Vec<u32>>> =
-            (0..self.n_genomes).map(|_| vec![Vec::new(); self.n_acc]).collect();
-
-        for (a, ai) in self.accs.iter().enumerate() {
-            // Exact reservation: we already know each genome's k-mer count.
-            for (g, row) in out.iter_mut().enumerate() {
-                let n = ai.kmer_counts[g] as usize;
-                if n > 0 {
-                    row[a].reserve_exact(n);
-                }
-            }
-            for k in 0..self.kspace {
-                let (s, e) = (ai.offsets[k] as usize, ai.offsets[k + 1] as usize);
-                for &g in &ai.postings[s..e] {
-                    out[g as usize][a].push(k as u32);
-                }
-            }
-        }
-        out
-    }
-
     pub fn posting_entries(&self) -> usize {
         self.accs.iter().map(|a| a.postings.len()).sum()
     }
@@ -214,34 +178,6 @@ mod tests {
         assert_eq!(a.kmer_counts, vec![3, 3, 0]);
     }
 
-    #[test]
-    fn to_forward_round_trips_exactly() {
-        let sets = vec![
-            vec![vec![1u32, 3, 5], vec![0u32, 7]],
-            vec![vec![3u32, 5, 7], vec![]],
-            vec![vec![], vec![2u32]],
-        ];
-        let p = Partition::build(&sets, 2, 8).unwrap();
-        assert_eq!(p.to_forward(), sets, "inverted -> forward must be lossless");
-    }
-
-    #[test]
-    fn to_forward_output_is_sorted() {
-        let sets = vec![
-            vec![vec![7u32, 1, 4]],   // deliberately unsorted input
-            vec![vec![2u32, 6]],
-        ];
-        // build() does not sort input, so normalise first the way callers do.
-        let norm: Vec<Vec<Vec<u32>>> = sets.iter().map(|g| {
-            g.iter().map(|v| { let mut v = v.clone(); v.sort_unstable(); v }).collect()
-        }).collect();
-        let p = Partition::build(&norm, 1, 8).unwrap();
-        for row in p.to_forward() {
-            for v in row {
-                assert!(v.windows(2).all(|w| w[0] < w[1]), "forward lists must be sorted");
-            }
-        }
-    }
 
     #[test]
     fn rejects_oversized_partition() {

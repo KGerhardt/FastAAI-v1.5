@@ -95,22 +95,15 @@ impl Database {
     /// Build the inverted index, chunked into partitions of `PARTITION_SIZE`.
     /// Idempotent.
     ///
-    /// The forward k-mer sets are **dropped** afterwards unless `keep_forward`.
-    /// A stored partition needs only the inverted index — that is ~36% of the
-    /// full size, and at GTDB scale the difference between 34 GB and 95 GB. It is
-    /// also what keeps a partition inside a 2 GiB-per-thread budget with working
-    /// space left over (0.56 GiB vs 1.55 GiB).
-    ///
-    /// A database sealed without the forward index can still act as a *query*
-    /// source: `search` reconstructs it per partition via `Partition::to_forward`.
-    /// Pass `keep_forward=True` only when a database will be queried from
-    /// repeatedly and the memory is available.
+    /// The forward k-mer sets are dropped afterwards: a stored partition needs
+    /// only the inverted index, which is ~36% of the full size and what keeps a
+    /// partition inside a 2 GiB-per-thread budget with working space left over
+    /// (0.56 GiB vs 1.55 GiB).
     ///
     /// Genome *i* lands in partition `i / PARTITION_SIZE` at local ID
     /// `i % PARTITION_SIZE`, so the global index is recoverable by arithmetic
     /// while posting lists store only `u16` local IDs.
-    #[pyo3(signature = (keep_forward = false))]
-    fn seal(&mut self, keep_forward: bool) -> PyResult<()> {
+    fn seal(&mut self) -> PyResult<()> {
         if !self.partitions.is_empty() {
             return Ok(());
         }
@@ -122,16 +115,12 @@ impl Database {
                 .map_err(PyRuntimeError::new_err)?;
             self.partitions.push(p);
         }
-        if !keep_forward {
-            self.sets = Vec::new();
-            self.sets.shrink_to_fit();
-        }
+        // The forward k-mer sets exist only to build the inverted index. Nothing
+        // downstream reads them, and keeping them would roughly triple a stored
+        // partition — 95 GB instead of 34 GB at GTDB scale.
+        self.sets = Vec::new();
+        self.sets.shrink_to_fit();
         Ok(())
-    }
-
-    #[getter]
-    fn has_forward(&self) -> bool {
-        !self.sets.is_empty()
     }
 
     #[getter]
@@ -176,14 +165,7 @@ impl Database {
 
     /// Number of accessions carried by each genome, in `genome_names` order.
     fn scp_counts(&self) -> Vec<usize> {
-        if !self.sets.is_empty() {
-            return self
-                .sets
-                .iter()
-                .map(|g| g.iter().filter(|v| !v.is_empty()).count())
-                .collect();
-        }
-        // From the inverted index: presence flags carry the same information.
+        // Presence flags in the inverted index carry this directly.
         let mut out = Vec::with_capacity(self.names.len());
         for p in &self.partitions {
             for g in 0..p.n_genomes {
@@ -220,93 +202,22 @@ impl Database {
 
     /// Search every genome in `self` against every genome in `target`.
     ///
-    /// Returns `(jaccard, shared, n_query, n_target)` where `jaccard` and `shared`
-    /// are row-major flat buffers of `n_query * n_target`. Jaccard is the mean over
-    /// shared accessions, NaN where nothing is shared.
+    /// Returns `(jaccard, shared, n_query, n_target)` — row-major flat buffers of
+    /// `n_query * n_target`. Jaccard is the mean over shared accessions, NaN where
+    /// nothing is shared.
     ///
-    /// Threads default to 0 meaning "let the caller decide"; scaling is
-    /// memory-bound and goes *negative* past ~16 threads on consumer hardware, so
-    /// this never silently uses every logical core.
-    #[pyo3(signature = (target, threads = 1))]
+    /// Both sides are read as inverted indexes, so no forward k-mer index is
+    /// needed anywhere. `block` sets the query-blocking width: the accumulator is
+    /// `block * n_target`, so it is the knob that keeps the two-dimensional
+    /// accumulator inside a RAM budget. Small blocks win — 128 keeps it in L2.
+    ///
+    /// Self-comparison (`db.search(db, ...)`) computes the strict upper triangle
+    /// and mirrors it, for a further ~1.23x.
+    ///
+    /// Threads are never defaulted to every logical core: scaling is memory-bound
+    /// and measured *negative* past ~16 on consumer hardware.
+    #[pyo3(signature = (target, block = 128, threads = 1))]
     fn search<'py>(
-        &self,
-        py: Python<'py>,
-        target: &Database,
-        threads: usize,
-    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize, usize)> {
-        if target.partitions.is_empty() {
-            return Err(PyRuntimeError::new_err("target database is not sealed"));
-        }
-
-        if self.schema_key() != target.schema_key() {
-            return Err(PyValueError::new_err(
-                "schema mismatch: query and target must share accession list, k and alphabet",
-            ));
-        }
-
-        // Forward k-mer sets: kept from build, or rebuilt from the inverted index
-        // one partition at a time so a targets-only database can still query.
-        let owned;
-        let source: &[Vec<Vec<u32>>] = if self.sets.is_empty() {
-            if self.partitions.is_empty() {
-                return Err(PyRuntimeError::new_err(
-                    "query database is neither sealed nor holding forward sets",
-                ));
-            }
-            owned = self
-                .partitions
-                .iter()
-                .flat_map(|p| p.to_forward())
-                .collect::<Vec<_>>();
-            &owned
-        } else {
-            &self.sets
-        };
-
-        let queries: Vec<Vec<(usize, Vec<u32>)>> = source
-            .iter()
-            .map(|g| {
-                g.iter()
-                    .enumerate()
-                    .filter(|(_, v)| !v.is_empty())
-                    .map(|(a, v)| (a, v.clone()))
-                    .collect()
-            })
-            .collect();
-
-        let (_, nt) = kernel::partition_offsets(&target.partitions);
-        let nq = queries.len();
-        let mut jac = vec![0.0f64; nq * nt];
-        let mut sh = vec![0u32; nq * nt];
-
-        // Release the GIL so the worker threads actually run in parallel.
-        // (PyO3 >= 0.26 spells this `detach`; it was `allow_threads` before.)
-        py.detach(|| {
-            kernel::search_partitions_into(
-                &target.partitions, &queries, threads, &mut jac, &mut sh);
-            // Reduce sums to means in place.
-            for i in 0..jac.len() {
-                jac[i] = if sh[i] == 0 { f64::NAN } else { jac[i] / sh[i] as f64 };
-            }
-        });
-
-        let jb = PyBytes::new(py, unsafe {
-            std::slice::from_raw_parts(jac.as_ptr() as *const u8, jac.len() * 8)
-        });
-        let sb = PyBytes::new(py, unsafe {
-            std::slice::from_raw_parts(sh.as_ptr() as *const u8, sh.len() * 4)
-        });
-        Ok((jb, sb, nq, nt))
-    }
-
-    /// Search via the k-mer join — both sides read as inverted indexes.
-    ///
-    /// Needs no forward index on either side, so a targets-only database is
-    /// closed under search. `block` sets the query-blocking width; the
-    /// accumulator is `block * n_target`, so this is the knob that keeps the
-    /// two-dimensional accumulator inside a RAM budget.
-    #[pyo3(signature = (target, block = 1024, threads = 1))]
-    fn search_join<'py>(
         &self,
         py: Python<'py>,
         target: &Database,
