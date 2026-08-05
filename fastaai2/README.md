@@ -22,8 +22,12 @@ maturin develop --release      # or: pip install .
 ## Use
 
 ```sh
-fastaai /path/to/genomes --hmm models.hmm -o aai.tsv
+fastaai build /path/to/genomes --hmm models.hmm -d db/ --archive arch/
+fastaai query -q db/ -o aai.tsv
 ```
+
+FastAAI 1 command lines (`build_db`, `db_query`, `aai_index`, …) are rerouted to
+these verbs.
 
 ```python
 import fastaai
@@ -104,6 +108,10 @@ scatter. Every variant that disturbed it lost.
 
 ## Status
 
-Alpha. Working end to end, in memory, partitioned at 16,384 genomes.
-Not yet implemented: on-disk partition format, genome manifest, block scheduler
-and resumable block outputs. See `../FASTAAI2_PLAN.md`.
+Working end to end. On-disk partitioned databases, genome manifest, merge,
+archives, the FastAAI 1 compatible CLI, and optional per-pair Jaccard standard
+deviation. Partitioned at 16,384 genomes.
+
+Not yet implemented: block scheduler and resumable block outputs — a database
+larger than memory must currently be queried partition by partition. Not yet
+packaged for bioconda. See `../FASTAAI2_PLAN.md`.

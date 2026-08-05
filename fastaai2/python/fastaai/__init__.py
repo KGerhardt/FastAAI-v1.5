@@ -11,6 +11,7 @@ from .pipeline import (
     GenomeRecord,
     SearchResult,
     build_database,
+    build_from_archive,
     preprocess,
     preprocess_one,
     search,
@@ -21,6 +22,9 @@ from .search import DEFAULT_FILTER, ModelSet, best_hits
 __version__ = "2.0.0a1"
 
 Database = _core.Database
+compare_pair = _core.compare_pair
+open_database = _core.open_database
+merge_databases = _core.merge_databases
 jaccard_to_aai = _core.jaccard_to_aai
 aai_to_jaccard = _core.aai_to_jaccard
 kmerize = _core.kmerize
@@ -41,7 +45,11 @@ __all__ = [
     "aai_to_jaccard",
     "best_hits",
     "build_database",
+    "build_from_archive",
+    "compare_pair",
     "find_genomes",
+    "merge_databases",
+    "open_database",
     "genome_name",
     "jaccard_to_aai",
     "kmerize",
