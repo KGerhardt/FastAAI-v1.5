@@ -22,5 +22,9 @@ features = ["pyo3/extension-module"]
 # The bundled model set. Without this the wheel ships no HMMs and `fastaai build`
 # cannot run without --hmm.
 include = [{ path = "python/fastaai/data/*", format = "wheel" }]
+# Evidence, not code. `methods/` is the concordance data and figure behind the
+# README's claims — 1.7 MB that no install needs. `prototype/` is outside this
+# crate entirely and so cannot reach an artifact.
+exclude = [{ path = "methods/**/*", format = "sdist" }]
 module-name = "fastaai._core"
 python-source = "python"
