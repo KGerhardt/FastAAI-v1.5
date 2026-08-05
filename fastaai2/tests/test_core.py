@@ -247,3 +247,79 @@ def test_compare_pair_no_shared_accession_is_nan():
 def test_compare_pair_rejects_out_of_range_accession():
     with pytest.raises(ValueError):
         fastaai._core.compare_pair([(5, b"MKVLAATT")], [(0, b"MKVLAATT")], 2)
+
+
+# ------------------------------------------------------- on-disk database
+
+def _small_db(tmp_path, n=5):
+    db = fastaai.Database(["a0", "a1"])
+    for i in range(n):
+        db.add_genome(f"g{i}", [(0, ("MKVLAATTGGHH" + "A" * i).encode()),
+                                (1, ("PQRSTVWYACDE" + "C" * i).encode())])
+    db.seal()
+    db.source = "unit test"
+    db.filter_mode = "v1"
+    return db
+
+
+def test_database_round_trips_through_disk(tmp_path):
+    """A stored index must compute the same numbers as the one it came from."""
+    db = _small_db(tmp_path)
+    ref = fastaai.search(db, db, threads=1)
+    path = str(tmp_path / "db.fastaai")
+    db.save(path)
+
+    got = fastaai._core.open_database(path)
+    assert got.n_genomes == db.n_genomes
+    assert got.genome_names == db.genome_names, "genome order is the output order"
+    assert got.scp_counts() == db.scp_counts()
+    assert got.source == "unit test" and got.filter_mode == "v1"
+
+    res = fastaai.search(got, got, threads=1)
+    assert np.allclose(res.jaccard, ref.jaccard, equal_nan=True)
+    assert (res.shared == ref.shared).all()
+
+
+def test_saving_an_unsealed_database_is_rejected(tmp_path):
+    db = fastaai.Database(["a0"])
+    db.add_genome("g", [(0, b"MKVLAATTGG")])
+    with pytest.raises(RuntimeError):
+        db.save(str(tmp_path / "db"))
+
+
+def test_opening_a_missing_database_errors(tmp_path):
+    with pytest.raises(Exception):
+        fastaai._core.open_database(str(tmp_path / "nope"))
+
+
+def test_truncated_partition_is_rejected_not_misread(tmp_path):
+    """A corrupt file must fail loudly. Silently wrong numbers are the costly
+    failure mode, and the one a checksum-free format has to guard against."""
+    import pathlib
+    db = _small_db(tmp_path)
+    path = tmp_path / "db.fastaai"
+    db.save(str(path))
+    part = path / "part.00000"
+    raw = part.read_bytes()
+    part.write_bytes(raw[: len(raw) // 2])
+    with pytest.raises(Exception):
+        fastaai._core.open_database(str(path))
+
+
+def test_forward_sets_are_not_stored(tmp_path):
+    """Only the inverted index goes to disk — keeping forward sets would roughly
+    triple a database for something the join never reads.
+
+    Stored size exceeds `index_bytes()` by the per-genome metadata that method
+    does not count (kmer_counts, the presence bitmap) plus length framing. That
+    overhead is fixed per accession, so it dominates a toy database and vanishes
+    at scale: measured 116.3 MB on disk against a 114.8 MB index for 2,943
+    genomes, a ratio of 1.013.
+    """
+    db = _small_db(tmp_path, n=20)
+    path = str(tmp_path / "db.fastaai")
+    db.save(path)
+    parts, _, _ = db.stored_bytes(path)
+    assert parts >= db.index_bytes()
+    assert parts < db.index_bytes() * 1.5, \
+        "stored size must track the inverted index, not the forward sets"

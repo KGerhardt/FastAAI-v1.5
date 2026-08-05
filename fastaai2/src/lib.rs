@@ -14,6 +14,7 @@ pub mod index;
 pub mod kernel;
 pub mod kmer;
 pub mod pairwise;
+pub mod store;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -21,6 +22,7 @@ use pyo3::types::PyBytes;
 
 use index::Partition;
 use kmer::{Alphabet, Kmerizer};
+use store::{ManifestEntry, Schema};
 
 /// A set of genomes k-merised against one accession list.
 ///
@@ -30,6 +32,12 @@ use kmer::{Alphabet, Kmerizer};
 #[pyclass]
 pub struct Database {
     accessions: Vec<String>,
+    /// Best-hit resolution used to build this database. Recorded because it
+    /// decides which protein each accession gets, and therefore comparability.
+    filter_mode: String,
+    /// Free-text provenance, e.g. "GTDB R232 bac120".
+    source: String,
+    manifest: Vec<ManifestEntry>,
     alphabet_str: String,
     k: usize,
     kspace: usize,
@@ -40,6 +48,19 @@ pub struct Database {
     /// needs the inverted index.
     sets: Vec<Vec<Vec<u32>>>,
     partitions: Vec<Partition>,
+}
+
+impl Database {
+    /// Not a `#[pymethod]`: `Schema` is a Rust type with no Python conversion.
+    fn schema_struct(&self) -> Schema {
+        Schema {
+            k: self.k,
+            alphabet: self.alphabet_str.clone(),
+            accessions: self.accessions.clone(),
+            filter_mode: self.filter_mode.clone(),
+            source: self.source.clone(),
+        }
+    }
 }
 
 #[pymethods]
@@ -54,6 +75,9 @@ impl Database {
         let kspace = alpha.kspace as usize;
         Ok(Database {
             accessions,
+            filter_mode: String::new(),
+            source: String::new(),
+            manifest: Vec::new(),
             alphabet_str: alphabet.to_string(),
             k,
             kspace,
@@ -110,6 +134,20 @@ impl Database {
         }
         if self.names.is_empty() {
             return Err(PyRuntimeError::new_err("cannot seal an empty database"));
+        }
+        // Manifest rows are built here, while the forward sets are still around:
+        // the content hash is over them, and it is what makes duplicate detection
+        // possible on a later merge.
+        self.manifest.clear();
+        for (ordinal, (name, sets)) in self.names.iter().zip(&self.sets).enumerate() {
+            self.manifest.push(ManifestEntry {
+                ordinal: ordinal as u32,
+                partition: (ordinal / index::PARTITION_SIZE) as u32,
+                local: (ordinal % index::PARTITION_SIZE) as u16,
+                scp_count: sets.iter().filter(|v| !v.is_empty()).count() as u16,
+                content_hash: store::content_hash(sets),
+                name: name.clone(),
+            });
         }
         for chunk in self.sets.chunks(index::PARTITION_SIZE) {
             let p = Partition::build(chunk, self.accessions.len(), self.kspace)
@@ -216,6 +254,47 @@ impl Database {
         )
     }
 
+    /// Best-hit filter recorded on this database.
+    #[getter]
+    fn filter_mode(&self) -> String { self.filter_mode.clone() }
+
+    #[setter]
+    fn set_filter_mode(&mut self, v: &str) { self.filter_mode = v.to_string(); }
+
+    /// Free-text provenance, e.g. "GTDB R232 bac120".
+    #[getter]
+    fn source(&self) -> String { self.source.clone() }
+
+    #[setter]
+    fn set_source(&mut self, v: &str) { self.source = v.to_string(); }
+
+    /// Write the database to *path* as a directory.
+    ///
+    /// Only the inverted index is stored — the forward k-mer sets exist to build
+    /// it and nothing downstream reads them. Partitions are written as separate
+    /// files so appending genomes later touches no existing partition.
+    fn save(&self, path: &str) -> PyResult<()> {
+        if self.partitions.is_empty() {
+            return Err(PyRuntimeError::new_err("database is not sealed"));
+        }
+        let dir = std::path::Path::new(path);
+        std::fs::create_dir_all(dir).map_err(to_py)?;
+        store::write_schema(dir, &self.schema_struct()).map_err(to_py)?;
+        store::write_manifest(dir, &self.manifest).map_err(to_py)?;
+        for (i, p) in self.partitions.iter().enumerate() {
+            store::write_partition(&dir.join(store::partition_file(i)), p).map_err(to_py)?;
+        }
+        Ok(())
+    }
+
+    /// Bytes on disk, by component.
+    fn stored_bytes(&self, path: &str) -> PyResult<(u64, u64, u64)> {
+        let dir = std::path::Path::new(path);
+        let sz = |p: std::path::PathBuf| p.metadata().map(|m| m.len()).unwrap_or(0);
+        let parts: u64 = store::partition_paths(dir).map_err(to_py)?.into_iter().map(sz).sum();
+        Ok((parts, sz(dir.join(store::SCHEMA_FILE)), sz(dir.join(store::MANIFEST_FILE))))
+    }
+
     /// Search every genome in `self` against every genome in `target`.
     ///
     /// Returns `(jaccard, shared, n_query, n_target)` — row-major flat buffers of
@@ -312,6 +391,54 @@ impl Database {
     }
 }
 
+fn to_py(e: std::io::Error) -> PyErr {
+    PyRuntimeError::new_err(e.to_string())
+}
+
+/// Open a database written by `Database.save`.
+///
+/// Reads schema, manifest and every partition. Partitions are separate files so
+/// lazy per-partition loading is a later change that needs no format revision —
+/// which is what a GTDB-scale database will want, since only one partition needs
+/// to be resident at a time.
+#[pyfunction]
+fn open_database(path: &str) -> PyResult<Database> {
+    let dir = std::path::Path::new(path);
+    let schema = store::read_schema(dir).map_err(to_py)?;
+    let manifest = store::read_manifest(dir).map_err(to_py)?;
+    let alpha = Alphabet::new(schema.alphabet.as_bytes(), schema.k)
+        .map_err(PyValueError::new_err)?;
+    let kspace = alpha.kspace as usize;
+
+    let mut partitions = Vec::new();
+    for p in store::partition_paths(dir).map_err(to_py)? {
+        let part = store::read_partition(&p).map_err(to_py)?;
+        if part.n_acc != schema.accessions.len() || part.kspace != kspace {
+            return Err(PyRuntimeError::new_err(format!(
+                "{}: partition disagrees with schema ({} accessions / kspace {} \
+                 vs {} / {})",
+                p.display(), part.n_acc, part.kspace, schema.accessions.len(), kspace
+            )));
+        }
+        partitions.push(part);
+    }
+
+    let names = manifest.iter().map(|m| m.name.clone()).collect();
+    Ok(Database {
+        accessions: schema.accessions,
+        filter_mode: schema.filter_mode,
+        source: schema.source,
+        manifest,
+        alphabet_str: schema.alphabet,
+        k: schema.k,
+        kspace,
+        kmerizer: Kmerizer::new(alpha),
+        names,
+        sets: Vec::new(), // forward sets are not stored and are never needed
+        partitions,
+    })
+}
+
 /// Jaccard to AAI percentage. NaN in, NaN out; uncensored by design.
 #[pyfunction]
 fn jaccard_to_aai(kaai: f64) -> f64 {
@@ -379,6 +506,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(aai_to_jaccard, m)?)?;
     m.add_function(wrap_pyfunction!(kmerize, m)?)?;
     m.add_function(wrap_pyfunction!(compare_pair, m)?)?;
+    m.add_function(wrap_pyfunction!(open_database, m)?)?;
     m.add("DEFAULT_ALPHABET", kmer::DEFAULT_ALPHABET)?;
     m.add("DEFAULT_K", kmer::DEFAULT_K)?;
     m.add("MAX_PARTITION", index::MAX_PARTITION)?;
