@@ -151,7 +151,7 @@ impl Database {
         block: usize,
         threads: usize,
         stdev: bool,
-    ) -> std::io::Result<(Vec<f64>, Vec<u32>, Vec<f64>, usize, usize)> {
+    ) -> std::io::Result<Block> {
         // Symmetric only when this is literally the same partition of the same
         // database. Blocks (qi, ti) and (ti, qi) of a self-search are transposes,
         // but each is written independently, so neither is skipped here.
@@ -202,8 +202,30 @@ impl Database {
         for i in 0..cells {
             jac[i] = if sh[i] == 0 { f64::NAN } else { jac[i] / sh[i] as f64 };
         }
-        Ok((jac, sh, sq, nq, nt))
+
+        // Accessions carried by each genome. `poss_shared_SCPs` is the smaller
+        // of the two: a pair cannot share more markers than the poorer genome
+        // has.
+        let count = |p: &Partition, g: usize| {
+            p.accs.iter().filter(|a| a.present[g]).count() as u32
+        };
+        let qcounts = (0..nq).map(|g| count(&qp, g)).collect();
+        let tcounts = (0..nt).map(|g| count(tpr, g)).collect();
+
+        Ok(Block { jac, sh, sq, nq, nt, qcounts, tcounts })
     }
+}
+
+/// One computed `q x t` block, reduced to final values.
+struct Block {
+    jac: Vec<f64>,
+    sh: Vec<u32>,
+    sq: Vec<f64>,
+    nq: usize,
+    nt: usize,
+    /// Accessions per genome, for `poss_shared_SCPs`.
+    qcounts: Vec<u32>,
+    tcounts: Vec<u32>,
 }
 
 #[pymethods]
@@ -648,7 +670,7 @@ impl Database {
             )));
         }
 
-        let (jac, sh, sq, nq, nt) = py
+        let Block { jac, sh, sq, nq, nt, .. } = py
             .detach(|| self.block_values(target, qi, ti, block, threads, stdev))
             .map_err(to_py)?;
 
@@ -729,7 +751,7 @@ impl Database {
 
         let written = py.detach(|| -> std::io::Result<(usize, f64)> {
             let t0 = std::time::Instant::now();
-            let (jac, sh, sq, nq, nt) =
+            let Block { jac, sh, sq, nq, nt, qcounts, tcounts } =
                 self.block_values(target, qi, ti, block, threads, stdev)?;
             let compute = t0.elapsed().as_secs_f64();
 
@@ -749,15 +771,16 @@ impl Database {
                 ))
             };
 
-            let mut head = String::from("query\ttarget\tshared_scps");
+            // FastAAI 1's columns, names and order. `jacc_SD` is always present
+            // and reads N/A when it was not asked for, exactly as v1 does, so a
+            // parser written against v1 sees the shape it expects.
+            let mut head = String::from("query\ttarget");
             if want_jac {
-                head.push_str("\tjaccard");
+                head.push_str("\tavg_jacc_sim");
             }
-            if stdev {
-                head.push_str("\tjaccard_sd");
-            }
+            head.push_str("\tjacc_SD\tnum_shared_SCPs\tposs_shared_SCPs");
             if want_aai {
-                head.push_str("\taai");
+                head.push_str("\tAAI_estimate");
             }
             head.push('\n');
             std::io::Write::write_all(&mut w, head.as_bytes())?;
@@ -770,27 +793,40 @@ impl Database {
                 for c in 0..nt {
                     let idx = r * nt + c;
                     let (j, s) = (jac[idx], sh[idx]);
+                    // v1 blanks every value column when a pair shares no
+                    // accession: there is no measurement, not a measurement of
+                    // zero.
+                    let no_hit = s == 0;
                     line.clear();
                     line.push_str(qname);
                     line.push('\t');
                     line.push_str(&target.names[tstart + c]);
-                    line.push('\t');
-                    let _ = std::fmt::Write::write_fmt(&mut line, format_args!("{s}"));
                     if want_jac {
                         line.push('\t');
-                        if j.is_nan() {
-                            line.push_str("NA");
+                        if no_hit || j.is_nan() {
+                            line.push_str(report::NO_HIT);
                         } else {
-                            report::fmt_g(&mut line, j, 10);
+                            report::fmt_py_round(&mut line, j, 4);
                         }
                     }
-                    if stdev {
-                        line.push('\t');
-                        if sq[idx].is_nan() {
-                            line.push_str("NA");
-                        } else {
-                            report::fmt_g(&mut line, sq[idx], 6);
-                        }
+                    line.push('\t');
+                    if !stdev || no_hit || sq[idx].is_nan() {
+                        line.push_str(report::NO_HIT);
+                    } else {
+                        report::fmt_py_round(&mut line, sq[idx], 4);
+                    }
+                    line.push('\t');
+                    if no_hit {
+                        line.push_str(report::NO_HIT);
+                    } else {
+                        let _ = std::fmt::Write::write_fmt(&mut line, format_args!("{s}"));
+                    }
+                    line.push('\t');
+                    if no_hit {
+                        line.push_str(report::NO_HIT);
+                    } else {
+                        let poss = qcounts[r].min(tcounts[c]);
+                        let _ = std::fmt::Write::write_fmt(&mut line, format_args!("{poss}"));
                     }
                     if want_aai {
                         line.push('\t');

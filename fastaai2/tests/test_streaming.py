@@ -132,6 +132,11 @@ def _saved(tmp_path, name, n, start=0):
     return str(p)
 
 
+def _pyround(v, dp):
+    """str(numpy.round(v, dp)) — what a v1 output file contains."""
+    return str(np.round(v, dp))
+
+
 def _rows(paths):
     out = []
     for path in paths:
@@ -147,7 +152,8 @@ def test_a_single_partition_search_writes_one_file(tmp_path):
     assert out.is_file()
     rows = _rows([out])
     assert len(rows) == 36
-    assert set(rows[0]) == {"query", "target", "shared_scps", "jaccard", "aai"}
+    assert list(rows[0]) == ["query", "target", "avg_jacc_sim", "jacc_SD",
+                             "num_shared_SCPs", "poss_shared_SCPs", "AAI_estimate"]
 
 
 def test_a_multi_block_search_writes_a_directory_of_blocks(tmp_path, multipart):
@@ -176,9 +182,9 @@ def test_multi_block_output_covers_every_pair_exactly_once(tmp_path, multipart):
     index = {n: i for i, n in enumerate(ref.query_names)}
     tindex = {n: i for i, n in enumerate(ref.target_names)}
     for r in rows[::997]:                       # stride: 49,500 rows is plenty
-        got = r["jaccard"]
+        got = r["avg_jacc_sim"]
         want = jac[index[r["query"]], tindex[r["target"]]]
-        assert got == ("NA" if np.isnan(want) else f"{want:.10g}")
+        assert got == ("N/A" if np.isnan(want) else _pyround(want, 4))
 
 
 def test_a_multi_block_search_refuses_to_write_to_one_file(tmp_path, multipart):
@@ -239,9 +245,12 @@ def test_output_across_two_distinct_databases(tmp_path):
 
 
 @pytest.mark.parametrize("emit,cols", [
-    ("aai", ["query", "target", "shared_scps", "aai"]),
-    ("jaccard", ["query", "target", "shared_scps", "jaccard"]),
-    ("both", ["query", "target", "shared_scps", "jaccard", "aai"]),
+    ("aai", ["query", "target", "jacc_SD", "num_shared_SCPs", "poss_shared_SCPs",
+             "AAI_estimate"]),
+    ("jaccard", ["query", "target", "avg_jacc_sim", "jacc_SD", "num_shared_SCPs",
+                 "poss_shared_SCPs"]),
+    ("both", ["query", "target", "avg_jacc_sim", "jacc_SD", "num_shared_SCPs",
+              "poss_shared_SCPs", "AAI_estimate"]),
 ])
 def test_emit_selects_the_columns(tmp_path, emit, cols):
     p = _saved(tmp_path, "db", 6)
@@ -255,7 +264,7 @@ def test_stdev_adds_a_column_matching_the_api(tmp_path):
     out = tmp_path / "sd.tsv"
     main(["query", "-q", p, "-o", str(out), "--do_stdev", "--quiet"])
     rows = _rows([out])
-    assert "jaccard_sd" in rows[0]
+    assert "jacc_SD" in rows[0]
 
     db = fastaai.open_database(p)
     ref = fastaai.search(db, db, threads=1, stdev=True)
@@ -263,14 +272,16 @@ def test_stdev_adds_a_column_matching_the_api(tmp_path):
     idx = {n: i for i, n in enumerate(ref.query_names)}
     for r in rows:
         want = sd[idx[r["query"]], idx[r["target"]]]
-        assert r["jaccard_sd"] == ("NA" if np.isnan(want) else f"{want:.6g}")
+        expect = "N/A" if np.isnan(want) or r["num_shared_SCPs"] == "N/A" \
+            else _pyround(want, 4)
+        assert r["jacc_SD"] == expect
 
 
 def test_stdout_is_the_default_for_a_single_block(tmp_path, capfd):
     p = _saved(tmp_path, "db", 4)
     main(["query", "-q", p, "--quiet"])
     out = capfd.readouterr().out
-    assert out.startswith("query\ttarget\tshared_scps")
+    assert out.startswith("query\ttarget\tavg_jacc_sim")
     assert len(out.strip().split("\n")) == 1 + 16
 
 

@@ -18,20 +18,42 @@ pub const AAI_CEILING: f64 = 90.0;
 pub const LABEL_BELOW: &str = "<30%";
 pub const LABEL_ABOVE: &str = ">90%";
 
+/// What FastAAI 1 writes where a pair shares no accession.
+pub const NO_HIT: &str = "N/A";
+
+/// `numpy.round(v, dp).astype(str)`, which is how FastAAI 1 renders every
+/// number in its TSV.
+///
+/// Two details carry: numpy rounds halves to even where Rust's `round` goes
+/// away from zero, and Python prints an integral float as `1.0` where Rust
+/// prints `1`. Both would show up as a diff against a v1 output file.
+pub fn fmt_py_round(out: &mut String, v: f64, dp: i32) {
+    let scale = 10f64.powi(dp);
+    let r = (v * scale).round_ties_even() / scale;
+    if r.fract() == 0.0 {
+        let _ = write!(out, "{r:.1}");
+    } else {
+        let _ = write!(out, "{r}");
+    }
+}
+
 /// One AAI estimate, categorical where the regression cannot resolve.
 ///
 /// Precedence matters: no measurement outranks the floor, and the floor
 /// outranks the ceiling so that zero Jaccard — which `log(0)` places *above*
 /// the ceiling — reports as `<30%` rather than as its inverse.
+///
+/// The floor and ceiling are tested against the *unrounded* estimate, as v1
+/// does: 29.999 is below the floor, not a value that rounds to 30.
 pub fn aai_label(out: &mut String, aai: f64, shared: u32, jac: f64) {
     if shared == 0 || jac.is_nan() {
-        out.push_str("NA");
+        out.push_str(NO_HIT);
     } else if jac == 0.0 || aai.is_nan() || aai < AAI_FLOOR {
         out.push_str(LABEL_BELOW);
     } else if aai > AAI_CEILING {
         out.push_str(LABEL_ABOVE);
     } else {
-        let _ = write!(out, "{aai:.2}");
+        fmt_py_round(out, aai, 2);
     }
 }
 
@@ -119,14 +141,49 @@ mod tests {
 
     #[test]
     fn no_shared_accessions_is_not_a_low_score() {
-        assert_eq!(lab(f64::NAN, 0, f64::NAN), "NA");
+        assert_eq!(lab(f64::NAN, 0, f64::NAN), NO_HIT);
     }
 
     #[test]
     fn band_edges_stay_numeric() {
-        assert_eq!(lab(30.0, 50, 0.006), "30.00");
-        assert_eq!(lab(90.0, 50, 0.843), "90.00");
+        assert_eq!(lab(30.0, 50, 0.006), "30.0");
+        assert_eq!(lab(90.0, 50, 0.843), "90.0");
         assert_eq!(lab(29.99, 50, 0.006), "<30%");
         assert_eq!(lab(90.01, 50, 0.9), ">90%");
+    }
+
+    fn r(v: f64, dp: i32) -> String {
+        let mut s = String::new();
+        fmt_py_round(&mut s, v, dp);
+        s
+    }
+
+    /// Expected values are what `str(numpy.round(v, dp))` produces, which is
+    /// what a v1 output file contains.
+    #[test]
+    fn matches_numpy_round_then_str() {
+        assert_eq!(r(1.0, 4), "1.0");
+        assert_eq!(r(0.0, 4), "0.0");
+        assert_eq!(r(0.8035714286, 4), "0.8036");
+        assert_eq!(r(0.9333333333, 4), "0.9333");
+        assert_eq!(r(0.875, 4), "0.875");
+        assert_eq!(r(86.4123, 2), "86.41");
+        assert_eq!(r(90.0, 2), "90.0");
+        assert_eq!(r(43.5, 2), "43.5");
+        assert_eq!(r(43.555, 2), "43.56");
+    }
+
+    /// An integral float prints as `1.0` in Python and `1` in Rust. Getting
+    /// this wrong shows up as a diff on every whole-numbered cell.
+    #[test]
+    fn integral_values_keep_a_decimal_point() {
+        assert_eq!(r(2.0, 4), "2.0");
+        assert_eq!(r(100.0, 2), "100.0");
+    }
+
+    #[test]
+    fn a_pair_sharing_nothing_reports_no_measurement() {
+        assert_eq!(lab(f64::NAN, 0, f64::NAN), NO_HIT);
+        assert_eq!(NO_HIT, "N/A");
     }
 }

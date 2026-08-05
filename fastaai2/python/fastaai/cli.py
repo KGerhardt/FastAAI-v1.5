@@ -135,7 +135,7 @@ def aai_label(aai, shared, jaccard) -> str:
     that their AAI is below 30% — it is the absence of a measurement.
     """
     if shared == 0 or (jaccard is not None and np.isnan(jaccard)):
-        return "NA"
+        return "N/A"
     if (jaccard is not None and jaccard == 0) or np.isnan(aai) or aai < AAI_FLOOR:
         return LABEL_BELOW
     if aai > AAI_CEILING:
@@ -146,8 +146,11 @@ def aai_label(aai, shared, jaccard) -> str:
 def aai_matrix_value(aai, shared, jaccard) -> str:
     """Matrix-format counterpart to `aai_label`, using v1's numeric sentinels."""
     label = aai_label(aai, shared, jaccard)
-    if label == "NA":
-        return "NA"
+    if label == "N/A":
+        # v1 writes 0 here. It reports "these genomes were never compared" as an
+        # AAI of zero, which a reader cannot distinguish from a real measurement
+        # of zero, so this is a deliberate departure.
+        return "N/A"
     if label == LABEL_BELOW:
         return f"{MATRIX_BELOW:.1f}"
     if label == LABEL_ABOVE:
@@ -218,7 +221,7 @@ def _write(res, out_path, style, emit):
     aai, shared, jacc = res.aai, res.shared, res.jaccard
     fh = open(out_path, "w") if out_path else sys.stdout
     try:
-        fh.write("\t" + "\t".join(res.target_names) + "\n")
+        fh.write("query_genome\t" + "\t".join(res.target_names) + "\n")
         for i, qn in enumerate(res.query_names):
             row = [aai_matrix_value(aai[i, j], shared[i, j], jacc[i, j])
                    for j in range(len(res.target_names))]
@@ -398,12 +401,27 @@ def _reroute(argv: list[str]) -> list[str]:
                 out.append(n)
         return out
 
-    if opt("-m", "--hmms"):
+    if opt("-m", "--hmms") or opt("-qh", "--query_hmms") or opt("-th", "--target_hmms"):
         raise SystemExit(
-            "-m/--hmms took precomputed HMMER tables as input. FastAAI 2 does not read "
-            "them; supply genomes or proteins, or reuse an --archive, which stores raw "
-            "hits and can be re-filtered without re-searching."
+            "precomputed HMMER tables (-m/-qh/-th) were an input in FastAAI 1. FastAAI 2 "
+            "does not read them; supply genomes or proteins, or reuse an --archive, which "
+            "stores raw hits and can be re-filtered without re-searching."
         )
+
+    # Anything the translation does not consume would otherwise vanish, because
+    # the new command line is built from scratch rather than edited. A dropped
+    # flag that changed v1's behaviour must be reported, never ignored.
+    unsupported = {
+        "--create_query_db": "build the query set into a database with `fastaai build`",
+        "--query_db_name": "build the query set into a database with `fastaai build`",
+        "--query_output": "query and target outputs are one file; run the two "
+                          "directions separately if both are wanted",
+        "--target_output": "query and target outputs are one file; run the two "
+                           "directions separately if both are wanted",
+    }
+    for flag, advice in unsupported.items():
+        if flag in rest:
+            raise SystemExit(f"{flag} is not supported: {advice}.")
 
     genomes, proteins = opt("-g", "--genomes"), opt("-p", "--proteins")
     inp = genomes or proteins
@@ -435,7 +453,18 @@ def _reroute(argv: list[str]) -> list[str]:
             + k + carried()
     if module == "merge_db":
         donors = [rest[i + 1] for i, a in enumerate(rest) if a in ("-d", "--donors")]
+        # v1 also took a file listing donors. Dropping it silently merged
+        # nothing and reported success.
+        donor_file = opt("--donor_file")
+        if donor_file:
+            try:
+                with open(donor_file) as fh:
+                    donors += [ln.strip() for ln in fh if ln.strip()]
+            except OSError as e:
+                raise SystemExit(f"--donor_file {donor_file}: {e}") from None
         recipient = opt("-r", "--recipient")
+        if not donors:
+            raise SystemExit("merge_db: no donor databases given (-d or --donor_file)")
         return ["merge", "-o", recipient, recipient] + donors
 
     raise SystemExit(f"unknown module {module!r}")
