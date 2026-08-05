@@ -3,9 +3,7 @@
 Average amino acid identity between microbial genomes, estimated from tetramer
 sketches of single-copy protein-coding genes.
 
-This is FastAAI with its search engine rewritten in Rust. Same algorithm, same
-answers, and no SQLite: the database is a partitioned inverted index that is
-memory-mapped rather than queried.
+This is FastAAI with its search engine rewritten in Rust. Same algorithm, but faster and lighter weight.
 
 ```
 FASTA ──► pyrodigal ──► pyhmmer ──► best-hit filter ──► k-merise ──► inverted index
@@ -112,49 +110,13 @@ res.shared    # (n, n) uint32, accessions carried by both genomes
 res.aai       # (n, n) float64, uncensored
 ```
 
-## Things that are easy to get wrong
-
-**`<30%` and `>90%` are results, not missing numbers.** The Jaccard→AAI
-regression has sensitivity only between them; outside that band the estimate
-cannot distinguish 27% from 19%, and printing either would assert a precision
-the method does not have. So the AAI column reports those two cases
-categorically, as v1 did. Matrix output, which cannot hold a string, carries
-v1's `15.0` and `95.0` sentinels.
-
-Zero Jaccard is labelled `<30%` — `log(0)` sends it to the top of the
-regression, so it must be caught before the ceiling test or two genomes with
-nothing in common report as `>90%`.
-
-**Jaccard is stored raw, and the labels are applied at output.** Storage keeps
-full precision so that a database can be re-reported, re-thresholded, or fed to
-a downstream model without having been rounded first; `res.jaccard` and
-`res.aai` in the Python API are raw floats for exactly that reason. The labels
-are what the *tool reports*, and there they are not optional.
-
-**Unshared pairs are `NA`, not `<30%`.** "These genomes share no marker" is the
-absence of a measurement, not a claim that their AAI is low.
-
-**Unshared pairs are NaN, not 0.** "These genomes share no marker" and "these
-genomes have AAI 0" are different statements.
+## Notes
 
 **The model set defines the accession list.** Accession IDs are positions in the
 HMM file's order; there is no compiled-in Pfam set. Two databases may only be
 compared when accession list, `k` and alphabet all match, and `search` refuses
 otherwise — mismatched model sets produce structurally valid, biologically
 meaningless output.
-
-**Best-hit resolution is a real choice** (`--filter`). Strict reciprocal best hit
-(`rbh`) is FastAAI's stated intent and is harsher than either path shipped in v1.
-The default `v1` reproduces v1 as actually executed. None is a superset of
-another, and the choice changes SCP sets and therefore AAI.
-
-**`--threads` defaults to 8, which is a starting point and not a ceiling.** The
-only scaling numbers measured so far come from a 6P+8E laptop (6.17× at 16
-threads, worse beyond), and that machine cannot say anything useful about the
-question: past six threads it is scheduling onto efficiency cores, and past
-fourteen it is oversubscribed. Neither is a property of the kernel. On a compute
-node with real memory bandwidth, raise `--threads` to your core count — nothing
-in the code caps it, and the laptop ceiling should not be mistaken for one.
 
 ## Layout
 
