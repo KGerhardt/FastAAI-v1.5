@@ -126,6 +126,11 @@ Working end to end. On-disk partitioned databases, genome manifest, merge,
 archives, the FastAAI 1 compatible CLI, and optional per-pair Jaccard standard
 deviation. Partitioned at 16,384 genomes.
 
-Not yet implemented: block scheduler and resumable block outputs — a database
-larger than memory must currently be queried partition by partition. Not yet
-packaged for bioconda. See `../FASTAAI2_PLAN.md`.
+Partitions stream from disk and results are written one block per partition
+pair, so neither the index nor the result matrix has to fit in memory.
+
+Deliberately not implemented: resumable block outputs. A search is cheap enough
+— minutes of CPU for a realistic query against GTDB's ~200k species clusters —
+that recomputing one costs less than the machinery for not recomputing it.
+
+Not yet packaged for bioconda. See `../FASTAAI2_PLAN.md`.

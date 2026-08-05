@@ -118,52 +118,88 @@ def test_a_self_block_carries_its_own_diagonal_and_mirror(tmp_path):
     assert np.isfinite(np.diag(blk)).all()                  # diagonal filled
 
 
-def test_block_files_agree_with_the_single_file_output(tmp_path):
-    db = _db(6)
-    p = str(tmp_path / "db")
-    db.save(p)
 
-    single = tmp_path / "all.tsv"
-    main(["query", "-q", p, "-o", str(single), "--quiet"])
-    blocks = tmp_path / "blocks"
-    main(["query", "-q", p, "--blocks", str(blocks), "--quiet"])
+# --- output ------------------------------------------------------------------
+#
+# There is one writer. A search whose two sides each fit a single partition is
+# the 1x1 case and lands in one file; anything larger lands in a directory of
+# blocks. No resume: the search is cheap enough that recomputing it beats the
+# machinery for not recomputing it.
 
-    def rows(paths):
-        out = {}
-        for path in paths:
-            with open(path) as fh:
-                for r in csv.DictReader(fh, delimiter="\t"):
-                    out[(r["query"], r["target"])] = (r["aai"], r["jaccard"])
-        return out
-
-    assert rows([single]) == rows(sorted(blocks.glob("*.tsv")))
+def _saved(tmp_path, name, n, start=0):
+    p = tmp_path / name
+    _db(n, start).save(str(p))
+    return str(p)
 
 
-def test_an_existing_block_is_not_recomputed(tmp_path):
-    db = _db(6)
-    p = str(tmp_path / "db")
-    db.save(p)
-    blocks = tmp_path / "blocks"
-    main(["query", "-q", p, "--blocks", str(blocks), "--quiet"])
-
-    dest = blocks / block_name(0, 0)
-    dest.write_text("SENTINEL\n")           # would be overwritten if recomputed
-    main(["query", "-q", p, "--blocks", str(blocks), "--quiet"])
-    assert dest.read_text() == "SENTINEL\n"
-
-    # ...unless resume is refused, which must rewrite it.
-    main(["query", "-q", p, "--blocks", str(blocks), "--no-resume", "--quiet"])
-    assert dest.read_text() != "SENTINEL\n"
+def _rows(paths):
+    out = []
+    for path in paths:
+        with open(path) as fh:
+            out.extend(csv.DictReader(fh, delimiter="\t"))
+    return out
 
 
-def test_a_partial_block_never_looks_complete(tmp_path):
-    """Resume keys on file existence, so writes must be atomic."""
-    db = _db(6)
-    p = str(tmp_path / "db")
-    db.save(p)
-    blocks = tmp_path / "blocks"
-    main(["query", "-q", p, "--blocks", str(blocks), "--quiet"])
-    assert list(blocks.glob("*.part*")) == []
+def test_a_single_partition_search_writes_one_file(tmp_path):
+    p = _saved(tmp_path, "db", 6)
+    out = tmp_path / "aai.tsv"
+    main(["query", "-q", p, "-o", str(out), "--quiet"])
+    assert out.is_file()
+    rows = _rows([out])
+    assert len(rows) == 36
+    assert set(rows[0]) == {"query", "target", "shared_scps", "jaccard", "aai"}
+
+
+def test_a_multi_block_search_writes_a_directory_of_blocks(tmp_path, multipart):
+    q = _saved(tmp_path, "q", 3, start=90_000)
+    out = tmp_path / "blocks"
+    main(["query", "-q", q, "-t", multipart, "-o", str(out), "--quiet"])
+    assert sorted(f.name for f in out.glob("*.tsv")) == [
+        block_name(0, 0), block_name(0, 1)
+    ]
+
+
+def test_multi_block_output_covers_every_pair_exactly_once(tmp_path, multipart):
+    """Blocks partition the result: no pair missing, none written twice."""
+    q = _saved(tmp_path, "q", 3, start=90_000)
+    out = tmp_path / "blocks"
+    main(["query", "-q", q, "-t", multipart, "-o", str(out), "--quiet"])
+
+    rows = _rows(sorted(out.glob("*.tsv")))
+    target = fastaai.open_database(multipart)
+    assert len(rows) == 3 * target.n_genomes
+    assert len({(r["query"], r["target"]) for r in rows}) == len(rows)
+
+    # ...and the values are the ones the API computes.
+    ref = fastaai.search(fastaai.open_database(q), target, threads=2)
+    jac = np.asarray(ref.jaccard).reshape(3, target.n_genomes)
+    index = {n: i for i, n in enumerate(ref.query_names)}
+    tindex = {n: i for i, n in enumerate(ref.target_names)}
+    for r in rows[::997]:                       # stride: 49,500 rows is plenty
+        got = r["jaccard"]
+        want = jac[index[r["query"]], tindex[r["target"]]]
+        assert got == ("NA" if np.isnan(want) else f"{want:.10g}")
+
+
+def test_a_multi_block_search_refuses_to_write_to_one_file(tmp_path, multipart):
+    """Silently concatenating blocks into stdout would defeat the point."""
+    q = _saved(tmp_path, "q", 3, start=90_000)
+    with pytest.raises(SystemExit):
+        main(["query", "-q", q, "-t", multipart, "--quiet"])
+
+
+def test_matrix_refuses_a_search_it_cannot_hold(tmp_path, multipart):
+    q = _saved(tmp_path, "q", 3, start=90_000)
+    with pytest.raises(SystemExit):
+        main(["query", "-q", q, "-t", multipart, "-o", str(tmp_path / "m"),
+              "--output_style", "matrix", "--quiet"])
+
+
+def test_a_partial_result_never_looks_complete(tmp_path):
+    p = _saved(tmp_path, "db", 6)
+    out = tmp_path / "aai.tsv"
+    main(["query", "-q", p, "-o", str(out), "--quiet"])
+    assert list(tmp_path.glob("*.part*")) == []
 
 
 def test_concurrent_writers_do_not_share_a_temp_file(tmp_path):
@@ -174,14 +210,11 @@ def test_concurrent_writers_do_not_share_a_temp_file(tmp_path):
     """
     import multiprocessing as mp
 
-    db = _db(40)
-    p = str(tmp_path / "db")
-    db.save(p)
-    blocks = tmp_path / "blocks"
-    blocks.mkdir()
+    p = _saved(tmp_path, "db", 40)
+    out = tmp_path / "aai.tsv"
 
     def worker(_i):
-        main(["query", "-q", p, "--blocks", str(blocks), "--no-resume", "--quiet"])
+        main(["query", "-q", p, "-o", str(out), "--quiet"])
 
     ctx = mp.get_context("fork")
     procs = [ctx.Process(target=worker, args=(i,)) for i in range(4)]
@@ -191,51 +224,54 @@ def test_concurrent_writers_do_not_share_a_temp_file(tmp_path):
         pr.join(60)
     assert all(pr.exitcode == 0 for pr in procs)
 
-    # Whoever won, the file must be one complete block, not a mixture.
-    rows = list(csv.DictReader(open(blocks / block_name(0, 0)), delimiter="\t"))
+    rows = _rows([out])
     assert len(rows) == 40 * 40
     assert len({(r["query"], r["target"]) for r in rows}) == 40 * 40
-    assert list(blocks.glob("*.part*")) == []
+    assert list(tmp_path.glob("*.part*")) == []
 
 
-def test_blocks_across_two_distinct_databases(tmp_path):
-    qa, tb = str(tmp_path / "q"), str(tmp_path / "t")
-    _db(10).save(qa)
-    _db(12, start=500).save(tb)
-    blocks = tmp_path / "blocks"
-    main(["query", "-q", qa, "-t", tb, "--blocks", str(blocks), "--quiet"])
-    rows = [r for f in blocks.glob("*.tsv")
-            for r in csv.DictReader(open(f), delimiter="\t")]
-    assert len(rows) == 10 * 12
+def test_output_across_two_distinct_databases(tmp_path):
+    qa = _saved(tmp_path, "q", 10)
+    tb = _saved(tmp_path, "t", 12, start=500)
+    out = tmp_path / "aai.tsv"
+    main(["query", "-q", qa, "-t", tb, "-o", str(out), "--quiet"])
+    assert len(_rows([out])) == 120
 
 
 @pytest.mark.parametrize("emit,cols", [
     ("aai", ["query", "target", "shared_scps", "aai"]),
     ("jaccard", ["query", "target", "shared_scps", "jaccard"]),
+    ("both", ["query", "target", "shared_scps", "jaccard", "aai"]),
 ])
-def test_blocks_honour_emit(tmp_path, emit, cols):
-    p = str(tmp_path / "db")
-    _db(6).save(p)
-    blocks = tmp_path / f"blocks_{emit}"
-    main(["query", "-q", p, "--blocks", str(blocks), "--emit", emit, "--quiet"])
-    got = sorted(blocks.glob("*.tsv"))[0]
-    assert open(got).readline().rstrip("\n").split("\t") == cols
+def test_emit_selects_the_columns(tmp_path, emit, cols):
+    p = _saved(tmp_path, "db", 6)
+    out = tmp_path / f"{emit}.tsv"
+    main(["query", "-q", p, "-o", str(out), "--emit", emit, "--quiet"])
+    assert open(out).readline().rstrip("\n").split("\t") == cols
 
 
-def test_block_stdev_matches_the_single_file_path(tmp_path):
-    p = str(tmp_path / "db")
-    _db(8).save(p)
-    single = tmp_path / "all.tsv"
-    main(["query", "-q", p, "-o", str(single), "--do_stdev", "--quiet"])
-    blocks = tmp_path / "blocks"
-    main(["query", "-q", p, "--blocks", str(blocks), "--do_stdev", "--quiet"])
+def test_stdev_adds_a_column_matching_the_api(tmp_path):
+    p = _saved(tmp_path, "db", 8)
+    out = tmp_path / "sd.tsv"
+    main(["query", "-q", p, "-o", str(out), "--do_stdev", "--quiet"])
+    rows = _rows([out])
+    assert "jaccard_sd" in rows[0]
 
-    def sd(paths):
-        return {(r["query"], r["target"]): r["jaccard_sd"]
-                for path in paths
-                for r in csv.DictReader(open(path), delimiter="\t")}
+    db = fastaai.open_database(p)
+    ref = fastaai.search(db, db, threads=1, stdev=True)
+    sd = np.asarray(ref.stdev).reshape(8, 8)
+    idx = {n: i for i, n in enumerate(ref.query_names)}
+    for r in rows:
+        want = sd[idx[r["query"]], idx[r["target"]]]
+        assert r["jaccard_sd"] == ("NA" if np.isnan(want) else f"{want:.6g}")
 
-    assert sd([single]) == sd(sorted(blocks.glob("*.tsv")))
+
+def test_stdout_is_the_default_for_a_single_block(tmp_path, capfd):
+    p = _saved(tmp_path, "db", 4)
+    main(["query", "-q", p, "--quiet"])
+    out = capfd.readouterr().out
+    assert out.startswith("query\ttarget\tshared_scps")
+    assert len(out.strip().split("\n")) == 1 + 16
 
 
 def test_saving_a_streamed_database_reproduces_it(tmp_path):
@@ -273,22 +309,7 @@ def test_merge_spans_partitions(tmp_path, multipart):
 
 
 def test_a_block_outside_the_grid_is_refused(tmp_path):
-    p = str(tmp_path / "db")
-    _db(5).save(p)
+    p = _saved(tmp_path, "db", 5)
     db = fastaai.open_database(p)
     with pytest.raises(ValueError):
         db.search_block(db, 0, 99)
-
-
-@pytest.mark.parametrize("extra", [
-    ["--do_stdev"],
-    ["--emit", "jaccard"],
-])
-def test_matrix_refuses_flags_it_cannot_represent(tmp_path, extra):
-    """A flag that changes the output columns must never be dropped quietly."""
-    db = _db(4)
-    p = str(tmp_path / "db")
-    db.save(p)
-    with pytest.raises(SystemExit):
-        main(["query", "-q", p, "-o", str(tmp_path / "out"),
-              "--output_style", "matrix", "--quiet"] + extra)

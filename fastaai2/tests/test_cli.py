@@ -229,3 +229,21 @@ def test_matrix_carries_v1_sentinels_since_a_cell_cannot_hold_a_string():
     assert aai_matrix_value(97.3, shared=50, jaccard=0.95) == "95.0"
     assert aai_matrix_value(44.72, shared=50, jaccard=0.2) == "44.72"
     assert aai_matrix_value(float("nan"), shared=0, jaccard=float("nan")) == "NA"
+
+
+def test_absent_optional_v1_flags_do_not_reach_argv():
+    """`opt` returns None for a flag the user did not type.
+
+    Passing that None through produced "expected one argument" against a flag
+    that was never on the command line.
+    """
+    for argv in (["db_query", "-q", "A"],
+                 ["aai_index", "-g", "G"],
+                 ["single_query", "-qg", "A", "-tg", "B"]):
+        assert None not in _reroute(argv), argv
+
+
+def test_a_v1_self_query_without_target_still_runs(tmp_path):
+    path, _db_obj = _db(tmp_path, "db", n=4)
+    main(["db_query", "-q", path, "-o", str(tmp_path / "out.tsv")])
+    assert (tmp_path / "out.tsv").is_file()

@@ -159,77 +159,70 @@ def block_name(qi: int, ti: int) -> str:
     return f"block_q{qi:05d}_t{ti:05d}.tsv"
 
 
-def write_blocks(query, target, out_dir, threads, block, stdev, emit, resume=True,
-                 quiet=False):
-    """Write one file per (query partition x target partition).
+def write_blocks(query, target, out_path, threads, block, stdev, emit, quiet=False):
+    """Write results as one file per (query partition x target partition).
 
-    The full matrix is never formed. Each file is bounded by the partition size
-    rather than by the size of either database, which is what makes an
-    all-vs-all at GTDB scale expressible at all.
+    The only output path. A search whose two sides each fit one partition is
+    simply the 1x1 case and lands in a single file — there is no separate
+    whole-matrix route, because the whole matrix is what stops being
+    representable first: 200k x 200k species is 40 billion pairs.
 
-    Files are written to a temporary name and renamed, so a file that exists is
-    a file that is complete — that is what makes `resume` safe after a kill, and
-    what lets separate processes take different blocks.
+    With one block, *out_path* is that file (`-` for stdout). With more, it is a
+    directory that receives them. Each block is bounded by the partition size
+    rather than by the size of either database.
+
+    Rust computes and writes each block: a full self-block is 268M rows, which
+    is not something to format one row at a time from Python.
     """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    grid = query.n_partitions * target.n_partitions
+    rows = compute = 0
 
-    written = skipped = rows = 0
+    if grid == 1:
+        rows, compute = query.write_block(target, 0, 0, out_path or "-", block,
+                                          threads, stdev, emit)
+        if not quiet:
+            print(f"  {rows:,} rows", file=sys.stderr)
+        return rows, compute
+
+    if not out_path or out_path == "-":
+        raise SystemExit(
+            f"this search is {query.n_partitions} x {target.n_partitions} blocks; "
+            "give -o a directory to write them into"
+        )
+    out_dir = Path(out_path)
+    out_dir.mkdir(parents=True, exist_ok=True)
     for qi in range(query.n_partitions):
         for ti in range(target.n_partitions):
             dest = out_dir / block_name(qi, ti)
-            if resume and dest.exists():
-                skipped += 1
-                continue
-            # Rust computes and writes: a full self-block is 268M rows, which is
-            # not something to format one row at a time from Python.
-            n = query.write_block(target, qi, ti, str(dest), block, threads, stdev, emit)
+            n, secs = query.write_block(target, qi, ti, str(dest), block, threads,
+                                        stdev, emit)
             rows += n
-            written += 1
+            compute += secs
             if not quiet:
                 print(f"  {dest.name}  {n:,} rows", file=sys.stderr)
 
     if not quiet:
-        print(f"{written} block(s) written ({rows:,} rows), {skipped} already present",
-              file=sys.stderr)
-    return written, skipped
+        print(f"{grid} blocks written ({rows:,} rows)", file=sys.stderr)
+    return rows, compute
 
 
 def _write(res, out_path, style, emit):
-    has_sd = res.stdev is not None
+    """Matrix output only.
+
+    TSV goes through `write_blocks`, which is the single writer for it — one
+    formatter, in Rust, for every TSV this program emits. A matrix is a
+    different shape rather than a different format: one dense array of every
+    pair, so it exists only for searches small enough to hold one.
+    """
+    assert style == "matrix", style
+    aai, shared, jacc = res.aai, res.shared, res.jaccard
     fh = open(out_path, "w") if out_path else sys.stdout
     try:
-        if style == "matrix":
-            aai, shared, jacc = res.aai, res.shared, res.jaccard
-            fh.write("\t" + "\t".join(res.target_names) + "\n")
-            for i, qn in enumerate(res.query_names):
-                row = [aai_matrix_value(aai[i, j], shared[i, j], jacc[i, j])
-                       for j in range(len(res.target_names))]
-                fh.write(qn + "\t" + "\t".join(row) + "\n")
-            return
-
-        aai = res.aai if emit in ("aai", "both") else None
-        cols = ["query", "target", "shared_scps"]
-        if emit in ("jaccard", "both"):
-            cols.append("jaccard")
-        if has_sd:
-            cols.append("jaccard_sd")
-        if emit in ("aai", "both"):
-            cols.append("aai")
-        fh.write("\t".join(cols) + "\n")
+        fh.write("\t" + "\t".join(res.target_names) + "\n")
         for i, qn in enumerate(res.query_names):
-            for j, tn in enumerate(res.target_names):
-                row = [qn, tn, str(res.shared[i, j])]
-                if emit in ("jaccard", "both"):
-                    v = res.jaccard[i, j]
-                    row.append("NA" if np.isnan(v) else f"{v:.10g}")
-                if has_sd:
-                    v = res.stdev[i, j]
-                    row.append("NA" if np.isnan(v) else f"{v:.6g}")
-                if emit in ("aai", "both"):
-                    row.append(aai_label(aai[i, j], res.shared[i, j],
-                                         res.jaccard[i, j]))
-                fh.write("\t".join(row) + "\n")
+            row = [aai_matrix_value(aai[i, j], shared[i, j], jacc[i, j])
+                   for j in range(len(res.target_names))]
+            fh.write(qn + "\t" + "\t".join(row) + "\n")
     finally:
         if out_path:
             fh.close()
@@ -277,14 +270,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="query database, archive, or sequences")
     q.add_argument("-t", "--target",
                    help="target database (default: query against itself, upper triangle)")
-    q.add_argument("-o", "--output", help="output TSV (default: stdout)")
+    q.add_argument("-o", "--output",
+                   help="output TSV, or a directory when the search spans more "
+                        "than one partition pair (default: stdout)")
     q.add_argument("--output_style", choices=("tsv", "matrix"), default="tsv")
     q.add_argument("--emit", choices=("aai", "jaccard", "both"), default="both")
-    q.add_argument("--blocks", metavar="DIR",
-                   help="write one TSV per query/target partition pair into DIR "
-                        "instead of one file; the full matrix is never held")
-    q.add_argument("--no-resume", action="store_true",
-                   help="with --blocks, recompute blocks whose file already exists")
     _common(q)
 
     m = sub.add_parser("merge", help="merge databases into one")
@@ -330,31 +320,37 @@ def cmd_query(args) -> int:
     same = not args.target or args.target == args.query
     tdb = qdb if same else _load_or_build(args.target, models, args, log)
 
-    if args.blocks:
-        if args.output_style == "matrix":
-            raise SystemExit("--blocks writes TSV; --output_style matrix does not apply.")
-        t0 = time.perf_counter()
-        written, skipped = write_blocks(
-            qdb, tdb, args.blocks, threads=args.threads, block=DEFAULT_BLOCK,
-            stdev=args.do_stdev, emit=args.emit, resume=not args.no_resume,
-            quiet=args.quiet,
-        )
-        log(f"blocks {time.perf_counter() - t0:.2f}s -> {args.blocks} "
-            f"({written} written, {skipped} skipped)")
-        return 0
-
+    pairs = qdb.n_genomes * tdb.n_genomes
     t0 = time.perf_counter()
-    res = search(qdb, tdb, threads=args.threads, stdev=args.do_stdev)
-    dt = time.perf_counter() - t0
-    pairs = len(res.query_names) * len(res.target_names)
-    # Reported per thread, not aggregated across the job: throughput per thread
-    # is the figure that compares across machines and thread counts, and it is
-    # the convention FastAAI 1's published figures use.
-    per_thread = pairs / max(dt, 1e-9) / max(args.threads, 1)
-    log(f"search {dt:.2f}s ({per_thread:,.0f} pairs/s/thread, {args.threads} threads)"
-        f"{' [symmetric, upper triangle]' if same else ''}")
+    compute = None
 
-    _write(res, args.output, args.output_style, args.emit)
+    if args.output_style == "matrix":
+        # A matrix is one dense array of every pair, so it exists only for
+        # searches small enough to hold one.
+        if qdb.n_partitions * tdb.n_partitions > 1:
+            raise SystemExit(
+                f"--output_style matrix needs the whole result in memory, and this "
+                f"search is {qdb.n_partitions} x {tdb.n_partitions} partitions. "
+                "Use the default TSV output."
+            )
+        res = search(qdb, tdb, threads=args.threads, stdev=args.do_stdev)
+        _write(res, args.output, args.output_style, args.emit)
+    else:
+        _rows, compute = write_blocks(
+            qdb, tdb, args.output, threads=args.threads, block=DEFAULT_BLOCK,
+            stdev=args.do_stdev, emit=args.emit, quiet=args.quiet)
+
+    dt = time.perf_counter() - t0
+    # Throughput is the kernel's, per thread — not aggregated over the job and
+    # not diluted by formatting and disk. Per thread is what compares across
+    # machines and thread counts, and is the convention FastAAI 1's published
+    # figures use; the write time is reported beside it rather than inside it.
+    kernel = compute if compute else dt
+    per_thread = pairs / max(kernel, 1e-9) / max(args.threads, 1)
+    tail = f", write {dt - kernel:.2f}s" if compute else ""
+    log(f"search {kernel:.2f}s ({per_thread:,.0f} pairs/s/thread, "
+        f"{args.threads} threads){tail}"
+        f"{' [symmetric, upper triangle]' if same else ''}")
     return 0
 
 
@@ -380,6 +376,16 @@ def _reroute(argv: list[str]) -> list[str]:
                     return rest[i + 1]
         return None
 
+    def pair(flag, value):
+        """A flag only when it has a value.
+
+        `opt` returns None for an absent flag, and putting that None into argv
+        makes argparse report "expected one argument" against a flag the user
+        never typed. Optional v1 arguments — `-o`, or `-t` on a self-query —
+        must simply not appear.
+        """
+        return [flag, value] if value is not None else []
+
     def carried():
         out = []
         for n in ("--threads", "--filter", "--output_style", "--limit", "--archive", "--hmm"):
@@ -403,27 +409,30 @@ def _reroute(argv: list[str]) -> list[str]:
     inp = genomes or proteins
     kind = ["--input", "protein"] if (proteins and not genomes) else []
 
+    out = opt("-o", "--output")
     if module == "build_db":
-        return ["build", inp, "-d", opt("-d", "--database") or opt("-o", "--output")] \
+        return ["build", inp] + pair("-d", opt("-d", "--database") or out) \
             + kind + carried()
     if module == "aai_index":
-        return ["query", "-q", inp, "-o", opt("-o", "--output")] + kind + carried()
+        return ["query"] + pair("-q", inp) + pair("-o", out) + kind + carried()
     if module == "db_query":
-        return ["query", "-q", opt("-q", "--query"), "-t", opt("-t", "--target"),
-                "-o", opt("-o", "--output")] + carried()
+        return ["query"] + pair("-q", opt("-q", "--query")) \
+            + pair("-t", opt("-t", "--target")) + pair("-o", out) + carried()
     if module == "simple_query":
-        return ["query", "-q", inp, "-t", opt("--target"),
-                "-o", opt("-o", "--output")] + kind + carried()
+        return ["query"] + pair("-q", inp) + pair("-t", opt("--target")) \
+            + pair("-o", out) + kind + carried()
     if module == "multi_query":
         qi = opt("--query_genomes") or opt("--query_proteins") or opt("--query_database")
         ti = opt("--target_genomes") or opt("--target_proteins") or opt("--target_database")
         k = ["--input", "protein"] if opt("--query_proteins") else []
-        return ["query", "-q", qi, "-t", ti, "-o", opt("-o", "--output")] + k + carried()
+        return ["query"] + pair("-q", qi) + pair("-t", ti) + pair("-o", out) \
+            + k + carried()
     if module == "single_query":
         qi = opt("-qg", "--query_genome") or opt("-qp", "--query_protein")
         ti = opt("-tg", "--target_genome") or opt("-tp", "--target_protein")
         k = ["--input", "protein"] if opt("-qp", "--query_protein") else []
-        return ["query", "-q", qi, "-t", ti, "-o", opt("-o", "--output")] + k + carried()
+        return ["query"] + pair("-q", qi) + pair("-t", ti) + pair("-o", out) \
+            + k + carried()
     if module == "merge_db":
         donors = [rest[i + 1] for i, a in enumerate(rest) if a in ("-d", "--donors")]
         recipient = opt("-r", "--recipient")

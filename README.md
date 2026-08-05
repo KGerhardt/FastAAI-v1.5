@@ -104,6 +104,12 @@ fastaai query -q db/ -o aai.tsv
 fastaai query -q queries/ -t db/ --hmm models.hmm -o aai.tsv
 ```
 
+Results are written one block per query/target partition pair. A search whose
+two sides each fit a single partition is the 1×1 case and lands in one file, so
+`-o aai.tsv` behaves as expected; a larger search needs `-o` to name a directory
+to receive the blocks. The full matrix is never held, which is what makes an
+all-vs-all at GTDB scale expressible — 200k × 200k species is 40 billion pairs.
+
 **FastAAI 1 command lines still work.** `build_db`, `db_query`, `merge_db`,
 `aai_index`, `single_query`, `multi_query` and `simple_query` are rerouted to
 the new verbs, with arguments preserved where they still mean something and a

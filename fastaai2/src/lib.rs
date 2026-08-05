@@ -672,13 +672,16 @@ impl Database {
     ///
     /// A full self-block is 16,384^2 = 268M rows. Formatting that a row at a
     /// time from Python is not viable, so the worker that computes a block also
-    /// writes it.
+    /// writes it. This is the only writer: a whole search is one block when
+    /// both sides fit a single partition, and many otherwise.
     ///
-    /// Written to a temporary name and renamed, so a file that exists is a file
-    /// that is complete — which is what lets a killed run resume and lets
-    /// separate processes take different blocks without coordinating.
+    /// *path* of `-` writes to stdout. Otherwise the block goes to a temporary
+    /// name and is renamed, so a reader never sees a half-written file.
     ///
-    /// Returns the number of data rows written.
+    /// Returns `(rows, compute_seconds)`. The split is reported because the two
+    /// are different claims: throughput per thread describes the kernel, and
+    /// folding formatting and disk into it would understate the engine while
+    /// pretending to measure it.
     #[pyo3(signature = (target, qi, ti, path, block = 128, threads = 1,
                         stdev = false, emit = "both"))]
     #[allow(clippy::too_many_arguments)]
@@ -693,7 +696,7 @@ impl Database {
         threads: usize,
         stdev: bool,
         emit: &str,
-    ) -> PyResult<usize> {
+    ) -> PyResult<(usize, f64)> {
         if !self.sealed() || !target.sealed() {
             return Err(PyRuntimeError::new_err("both databases must be sealed"));
         }
@@ -724,18 +727,27 @@ impl Database {
         let (qstart, tstart) = (qoffs[qi], toffs[ti]);
         let dest = std::path::PathBuf::from(path);
 
-        let written = py.detach(|| -> std::io::Result<usize> {
+        let written = py.detach(|| -> std::io::Result<(usize, f64)> {
+            let t0 = std::time::Instant::now();
             let (jac, sh, sq, nq, nt) =
                 self.block_values(target, qi, ti, block, threads, stdev)?;
+            let compute = t0.elapsed().as_secs_f64();
 
             // Temp name carries the pid. Two processes told to write the same
             // block would otherwise open the same file, interleave their rows
             // and rename the result into place — corruption that looks like a
             // complete block. Renaming is atomic, so if both do finish, one
             // simply replaces the other with identical bytes.
+            let to_stdout = path == "-";
             let tmp = dest.with_extension(format!("part.{}", std::process::id()));
-            let file = std::fs::File::create(&tmp)?;
-            let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
+            let mut w: Box<dyn std::io::Write> = if to_stdout {
+                Box::new(std::io::BufWriter::with_capacity(1 << 20, std::io::stdout()))
+            } else {
+                Box::new(std::io::BufWriter::with_capacity(
+                    1 << 20,
+                    std::fs::File::create(&tmp)?,
+                ))
+            };
 
             let mut head = String::from("query\ttarget\tshared_scps");
             if want_jac {
@@ -790,8 +802,10 @@ impl Database {
             }
             std::io::Write::flush(&mut w)?;
             drop(w);
-            std::fs::rename(&tmp, &dest)?;
-            Ok(nq * nt)
+            if !to_stdout {
+                std::fs::rename(&tmp, &dest)?;
+            }
+            Ok((nq * nt, compute))
         });
         written.map_err(to_py)
     }

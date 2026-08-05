@@ -26,6 +26,10 @@ The 120-genome row is fixed cost, not throughput: at that size v1's per-query
 TEMP TABLE and INNER JOIN dominate, and neither version is doing enough work
 to measure.
 
+These are kernel times. Writing the result is reported separately and is not
+folded into throughput: the 8,661,249-row TSV for the 2,943-genome search takes
+a further ~2.2 s to format and write.
+
 Memory and disk at 2,943 genomes:
   peak RSS          v1 1.01 GB     v1.5 412 MB (search, incl. output matrices)
   database on disk  v1 508 MB      v1.5 116 MB
