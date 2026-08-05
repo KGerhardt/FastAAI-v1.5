@@ -1,0 +1,16 @@
+Search phase: FastAAI 1 vs 1.5, same genomes, same machine, 8 threads.
+Both figures are whole-process wall clock minus the ~0.22 s interpreter
+start that both versions pay identically.
+
+scale                   pairs         v1       v1.5   v1.5 pairs/s   speedup
+120 genomes            14,400      1.15s     0.016s        922,339       74x
+2,943 genomes       8,661,249     21.84s     1.587s      5,457,298       14x
+
+Both v1 figures were measured with `db_query --in_memory --store_results`,
+its fastest path. Peak RSS at 2,943 genomes: v1 1.01 GB, against a v1.5
+index of 116 MB. Database on disk at that scale: v1 508 MB, v1.5 116 MB.
+
+The two speedups are not in tension. At 120 genomes the pairwise work is
+trivial and v1's per-query TEMP TABLE and INNER JOIN overhead is most of
+the runtime, so the ratio measures fixed cost. At 2,943 genomes the work
+dominates, and 14x is the figure that describes the engine.

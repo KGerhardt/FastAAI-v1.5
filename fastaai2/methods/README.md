@@ -41,6 +41,43 @@ Self-comparisons are excluded: Jaccard is 1.0 in both versions, and the AAI
 regression is unbounded above, so they land near 150% and compress the real
 40–70% band into a corner.
 
+## `timings_{preprocessing.tsv,search.txt}`
+
+Measured, not extrapolated. Two earlier estimates of the search speedup — 3x
+from a model of v1's kernel, 74x from a 120-genome run — both missed; the
+number below comes from building a real FastAAI 1 database at 2,943 genomes
+and querying it against itself.
+
+    python timings.py <genome_dir> <models.hmm> [n_genomes] [threads]
+
+**Preprocessing**, per genome, one thread each (the pipeline parallelises
+across genomes, so `cpus=1` is the figure that composes). 24 Firmicutes:
+
+| stage | median s/genome | share |
+|---|---|---|
+| predict (pyrodigal) | 1.79 | 64% |
+| hmmsearch (pyhmmer) | 1.03 | 36% |
+
+Unchanged in 1.5 beyond the move to in-process libraries — it is the same
+Prodigal and the same HMMER, and it still dominates a cold run.
+
+**Search**, 8 threads, wall clock less the ~0.22 s interpreter start both
+versions pay:
+
+| scale | pairs | v1 | v1.5 | v1.5 pairs/s | speedup |
+|---|---|---|---|---|---|
+| 120 genomes | 14,400 | 1.15 s | 0.016 s | 922,339 | 74x |
+| **2,943 genomes** | **8,661,249** | **21.84 s** | **1.587 s** | **5,457,298** | **14x** |
+
+**14x is the honest headline.** The two rows are not in tension: at 120
+genomes the pairwise work is trivial and v1's per-query `TEMP TABLE` +
+`INNER JOIN` overhead is most of the runtime, so 74x measures fixed cost.
+At 2,943 genomes the work dominates.
+
+v1 was run through `db_query --in_memory --store_results`, its fastest path.
+At 2,943 genomes it peaked at 1.01 GB RSS against a 116 MB v1.5 index, and
+its database occupies 508 MB on disk to v1.5's 116 MB.
+
 ## Reproducing
 
 The v1 side needs FastAAI 1 and its bundled SCP HMMs. The v1.5 side rebuilds

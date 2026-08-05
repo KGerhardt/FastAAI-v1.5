@@ -1,0 +1,3 @@
+stage	median_s_per_genome	total_s	n_genomes	threads
+predict (pyrodigal)	1.7863	49.05	24	1
+hmmsearch (pyhmmer)	1.0291	27.33	24	1
