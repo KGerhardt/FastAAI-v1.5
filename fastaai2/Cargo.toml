@@ -2,6 +2,9 @@
 name = "fastaai-core"
 version = "0.1.0"
 edition = "2021"
+description = "Counting kernel and inverted index for FastAAI"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/KGerhardt/FastAAI-v1.5"
 
 [lib]
 name = "fastaai_core"

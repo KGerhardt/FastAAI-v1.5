@@ -6,13 +6,29 @@ build-backend = "maturin"
 name = "fastaai"
 version = "2.0.0a1"
 description = "Fast whole-genome average amino acid identity from single-copy protein tetramer sketches"
+readme = "README.md"
 requires-python = ">=3.9"
+license = "GPL-3.0-or-later"
+# A copy of the repo-root LICENSE: license-files cannot reference a parent
+# directory, and the package must carry its own license to be installable.
+license-files = ["LICENSE"]
+authors = [{ name = "Kenji Gerhardt" }]
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Rust",
+]
+
 dependencies = [
     "pyfastx>=2.0",
     "pyrodigal>=3.0",
     "pyhmmer>=0.10",
     "numpy>=1.21",
 ]
+
+[project.urls]
+Homepage = "https://github.com/KGerhardt/FastAAI-v1.5"
+Source = "https://github.com/KGerhardt/FastAAI-v1.5"
 
 [project.scripts]
 fastaai = "fastaai.cli:main"

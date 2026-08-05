@@ -219,3 +219,14 @@ FastAAI 1 compatible CLI, and optional per-pair Jaccard standard deviation
 (`--do_stdev`). 87 Python and 44 Rust tests.
 
 Not yet packaged for bioconda.
+
+## Licence
+
+GPL-3.0-or-later — see [LICENSE](LICENSE). This is not only a preference:
+FastAAI 1.5 imports pyrodigal, which is GPL-3.0-or-later, so a compatible
+licence is required rather than chosen.
+
+The bundled HMMs in `fastaai2/python/fastaai/data/` are redistributed from
+FastAAI 1 under the MIT licence and keep their original notice; see the README
+beside them. FastAAI 1 itself remains at
+https://github.com/cruizperez/FastAAI.
