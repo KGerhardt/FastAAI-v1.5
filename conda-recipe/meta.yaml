@@ -1,0 +1,74 @@
+{% set name = "fastaai" %}
+{% set version = "2.0.0a1" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  # Local build, for testing an install before anything is published. A
+  # submitted bioconda recipe replaces this with a url + sha256 of a release
+  # tarball; nothing else here needs to change.
+  path: ../fastaai2
+
+build:
+  number: 0
+  script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
+  entry_points:
+    - fastaai = fastaai.cli:main
+
+requirements:
+  build:
+    # Named directly rather than via {{ compiler('rust') }}: the compiler jinja
+    # needs conda-forge's pinning config, which a local build does not have. A
+    # submitted recipe should use the jinja form.
+    - rust >=1.70
+  host:
+    # Bare `python`: conda-build injects the variant's own pin here, and a
+    # `>=3.9` alongside it concatenates into an invalid spec. The floor is
+    # declared in pyproject.toml, which pip enforces at install time.
+    - python
+    - pip
+    - maturin >=1.7,<2.0
+  run:
+    - python
+    - pyfastx >=2.0
+    - pyrodigal >=3.0
+    - pyhmmer >=0.10
+    - numpy >=1.21
+
+test:
+  imports:
+    - fastaai
+  requires:
+    - pytest
+  commands:
+    # The CLI resolves, and FastAAI 1 command lines still reach it.
+    - fastaai --help
+    - fastaai build --help
+    - fastaai query --help
+    # The bundled model set must survive packaging: without it `build` cannot
+    # run without --hmm, which is the whole point of shipping it.
+    - python -c "from fastaai.search import ModelSet; m = ModelSet(); assert len(m) == 122, len(m); print('bundled models:', len(m), m.fingerprint[:16])"
+    # And the engine works end to end on a real single-copy protein.
+    - python -c "import fastaai; d = fastaai.Database(['a']); d.add_genome('g', [(0, b'MFRFFKSIGQEMREVDWPNFKQLRKDSSTVISTSVFFIAFLALARLANSIVP')]); d.seal(); r = fastaai.search(d, d, threads=1); print('self jaccard:', r.jaccard[0][0])"
+
+about:
+  home: https://github.com/KGerhardt/FastAAI-v1.5
+  license: GPL-3.0-or-later
+  license_family: GPL3
+  license_file: LICENSE
+  summary: Fast whole-genome average amino acid identity from single-copy protein tetramer sketches
+  description: |
+    FastAAI estimates average amino acid identity between microbial genomes from
+    tetramer sketches of single-copy protein-coding genes. This release replaces
+    the SQLite-backed search with a Rust counting kernel over a partitioned
+    inverted index, and streams both the index and the results so neither has to
+    fit in memory.
+
+    Output is FastAAI 1's TSV schema and FastAAI 1 command lines are rerouted, so
+    existing pipelines keep working.
+
+    The 122 single-copy protein HMMs FastAAI 1 shipped are bundled and used by
+    default. They are redistributed under the MIT licence and carry their
+    original notice; see the README beside them.

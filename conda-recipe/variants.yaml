@@ -1,0 +1,6 @@
+# Which interpreter to build against. The extension is abi3, so this selects
+# the build Python rather than constraining what the package supports.
+#
+# Required: an unpinned `python` makes the solve try every ABI at once and fail.
+python:
+  - "3.11"
