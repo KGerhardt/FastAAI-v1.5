@@ -175,6 +175,20 @@ compared when accession list, `k` and alphabet all match, and `search` refuses
 otherwise — mismatched model sets produce structurally valid, biologically
 meaningless output.
 
+**Model identity is verified, not assumed.** Matching accession names and order
+do not establish that two databases were built from the same HMMs: a model
+revised between Pfam releases keeps its name, accession and position while
+matching different proteins, which changes the SCP assignment and so the AAI
+with nothing in the output looking wrong. Each database records a digest of the
+models it was built from, and a comparison across differing digests is refused.
+
+The digest is over each model's own parameters — emissions and transitions —
+plus HMMER's `CKSUM` where the file carries one, so it is reproducible by any
+implementation reading the same models and is defined for any SCP set. `CKSUM`
+is optional in the format, which is why it is not the only ingredient. A
+database built without an HMM set records no digest; that is reported as
+unverifiable rather than treated as a conflict.
+
 ## Layout
 
 | | |

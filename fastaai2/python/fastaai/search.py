@@ -8,6 +8,7 @@ pyhmmer releases the GIL during search, so this is threaded rather than forked.
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from typing import Literal
@@ -109,8 +110,69 @@ class ModelSet:
         return len(self.hmms)
 
     @property
+    def fingerprint(self) -> str:
+        """Identity of this model set, independent of implementation and file.
+
+        Accession names and their order do not establish that two databases were
+        built from the same models: a Pfam version bump or a locally edited HMM
+        keeps every name and position while changing which proteins hit, which
+        changes the k-mer sets and so the AAI — silently, because nothing about
+        the output looks wrong.
+
+        Hashed per model rather than over the file, so it survives reformatting,
+        HMMER version differences and concatenation order of the source files:
+
+        - the model's own parameters — match and insert emissions and transition
+          probabilities. This is the model, so it is always computable and
+          always meaningful.
+        - `CKSUM`, HMMER's checksum of the training alignment, when the file
+          carries one. Free identity from HMMER itself, but optional in the
+          format, which is why it cannot be the only ingredient: a model without
+          one would otherwise fingerprint on its name alone.
+        - model length and both names, so models that somehow agree numerically
+          still separate.
+
+        Order is included by construction: accession IDs are positions in this
+        list, so two sets holding the same models in a different order are not
+        interchangeable and must not share a fingerprint.
+        """
+        h = hashlib.sha256()
+        for acc, hmm in zip(self.accessions, self.hmms):
+            cksum = hmm.checksum
+            h.update("\t".join([
+                acc,
+                _text(hmm.name) or "",
+                str(hmm.M),
+                "-" if cksum is None else str(cksum),
+                _model_digest(hmm),
+            ]).encode())
+            h.update(b"\n")
+        return h.hexdigest()
+
+    @property
     def bit_cutoffs(self) -> str | None:
         return "trusted" if self.has_trusted else None
+
+
+def _model_digest(hmm) -> str:
+    """Digest of a model's parameters — what actually decides which proteins hit.
+
+    `CKSUM` is optional in the HMM format, so a fingerprint resting on it alone
+    degrades to the model's name for any file that omits one. The parameters are
+    always present, so this is always computable.
+
+    Emissions and transitions are stored in the file as fixed-precision text and
+    parsed to IEEE-754 floats, so the bytes are reproducible for anyone reading
+    the same models.
+    """
+    import numpy as np
+
+    h = hashlib.sha256()
+    for attr in ("match_emissions", "insert_emissions", "transition_probabilities"):
+        arr = np.ascontiguousarray(np.asarray(getattr(hmm, attr), dtype=np.float32))
+        h.update(str(arr.shape).encode())
+        h.update(arr.tobytes())
+    return h.hexdigest()
 
 
 def _text(v) -> str | None:

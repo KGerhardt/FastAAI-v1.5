@@ -39,6 +39,7 @@ PROTEIN_DIR = "proteins"
 HITS_FILE = "hits.tsv.gz"
 MANIFEST_FILE = "manifest.tsv"
 MODELS_FILE = "models.txt"
+FINGERPRINT_FILE = "models.sha256"
 
 
 def _safe(name: str) -> str:
@@ -48,10 +49,14 @@ def _safe(name: str) -> str:
 class Archive:
     """Streaming writer. Genomes are appended as they finish preprocessing."""
 
-    def __init__(self, root, accessions: Iterable[str]):
+    def __init__(self, root, accessions: Iterable[str], fingerprint: str = ""):
         self.root = Path(root)
         (self.root / PROTEIN_DIR).mkdir(parents=True, exist_ok=True)
         (self.root / MODELS_FILE).write_text("\n".join(accessions) + "\n")
+        # Kept alongside the accession names so a database rebuilt from this
+        # archive can still say which models produced these hits.
+        if fingerprint:
+            (self.root / FINGERPRINT_FILE).write_text(fingerprint + "\n")
         self._hits = gzip.open(self.root / HITS_FILE, "wt")
         self._hits.write("genome\tprotein\taccession\tscore\n")
         self._man = open(self.root / MANIFEST_FILE, "w")
@@ -91,6 +96,12 @@ class Archive:
 
 def read_models(root) -> list[str]:
     return (Path(root) / MODELS_FILE).read_text().split()
+
+
+def read_fingerprint(root) -> str:
+    """Model-set digest, or empty for an archive written before it was stored."""
+    path = Path(root) / FINGERPRINT_FILE
+    return path.read_text().strip() if path.exists() else ""
 
 
 def read_proteins(root, genome: str) -> dict[str, str]:

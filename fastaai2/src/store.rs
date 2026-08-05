@@ -33,7 +33,11 @@ use crate::index::{AccIndex, Encoding, Partition};
 pub const SCHEMA_MAGIC: &[u8; 8] = b"FA2SCHM1";
 pub const MANIFEST_MAGIC: &[u8; 8] = b"FA2MANI1";
 pub const PARTITION_MAGIC: &[u8; 8] = b"FA2PART1";
-pub const FORMAT_VERSION: u16 = 1;
+/// Bumped to 2 when the schema gained a model fingerprint. A version 1
+/// database is rejected on open rather than read with the field missing: it
+/// cannot say which models it was built from, and silently treating that as
+/// "compatible with anything" is the failure the fingerprint exists to stop.
+pub const FORMAT_VERSION: u16 = 2;
 
 pub const SCHEMA_FILE: &str = "schema";
 pub const MANIFEST_FILE: &str = "manifest";
@@ -58,6 +62,16 @@ pub struct Schema {
     pub filter_mode: String,
     /// Free-text provenance, e.g. "GTDB R232 bac120". Not part of equality.
     pub source: String,
+    /// Digest of the HMM set this database was built against, or empty when it
+    /// was built without one.
+    ///
+    /// Accession names and their ordering do not establish model identity: two
+    /// databases can agree on both and still have been built from different
+    /// models — a Pfam version bump, or a locally edited HMM — which produces
+    /// structurally valid, quietly incomparable output. The digest is over each
+    /// model's own identity, so it verifies independently of this
+    /// implementation and of any particular SCP set. See `ModelSet.fingerprint`.
+    pub models: String,
 }
 
 impl Schema {
@@ -77,6 +91,22 @@ impl Schema {
                 "best-hit filter differs: {:?} vs {:?} — these assign different \
                  proteins to each accession",
                 self.filter_mode, other.filter_mode
+            ));
+        }
+        // Only decisive when both sides know their models. A database built
+        // without an HMM set cannot be checked, and refusing it would be a
+        // claim we have no evidence for; two that both know, and disagree, are
+        // genuinely incomparable however well their accession names line up.
+        if !self.models.is_empty()
+            && !other.models.is_empty()
+            && self.models != other.models
+        {
+            return Err(format!(
+                "HMM model sets differ ({} vs {}) — the accession names may match, \
+                 but these were built from different models and their k-mer sets \
+                 are not comparable",
+                &self.models[..8.min(self.models.len())],
+                &other.models[..8.min(other.models.len())]
             ));
         }
         if self.accessions.len() != other.accessions.len() {
@@ -239,6 +269,7 @@ pub fn write_schema(dir: &Path, s: &Schema) -> io::Result<()> {
     w.str(&s.alphabet);
     w.str(&s.filter_mode);
     w.str(&s.source);
+    w.str(&s.models);
     w.u32(s.accessions.len() as u32);
     for a in &s.accessions {
         w.str(a);
@@ -253,12 +284,13 @@ pub fn read_schema(dir: &Path) -> io::Result<Schema> {
     let alphabet = r.str()?;
     let filter_mode = r.str()?;
     let source = r.str()?;
+    let models = r.str()?;
     let n = r.u32()? as usize;
     let mut accessions = Vec::with_capacity(n);
     for _ in 0..n {
         accessions.push(r.str()?);
     }
-    Ok(Schema { k, alphabet, accessions, filter_mode, source })
+    Ok(Schema { k, alphabet, accessions, filter_mode, source, models })
 }
 
 // ----------------------------------------------------------------- manifest
@@ -419,6 +451,7 @@ mod tests {
             accessions: vec!["acc0".into(), "acc1".into()],
             filter_mode: "v1".into(),
             source: "test".into(),
+            models: "cafebabe".into(),
         }
     }
 

@@ -38,6 +38,8 @@ pub struct Database {
     filter_mode: String,
     /// Free-text provenance, e.g. "GTDB R232 bac120".
     source: String,
+    /// Digest of the HMM set this was built against; empty when unknown.
+    models: String,
     manifest: Vec<ManifestEntry>,
     alphabet_str: String,
     k: usize,
@@ -88,6 +90,7 @@ impl Database {
             accessions: self.accessions.clone(),
             filter_mode: self.filter_mode.clone(),
             source: self.source.clone(),
+            models: self.models.clone(),
         }
     }
 
@@ -242,6 +245,7 @@ impl Database {
             accessions,
             filter_mode: String::new(),
             source: String::new(),
+            models: String::new(),
             manifest: Vec::new(),
             alphabet_str: alphabet.to_string(),
             k,
@@ -445,6 +449,14 @@ impl Database {
     #[setter]
     fn set_source(&mut self, v: &str) { self.source = v.to_string(); }
 
+    /// Digest of the HMM set this database was built against, or empty when it
+    /// was built without one. See `ModelSet.fingerprint`.
+    #[getter]
+    fn models(&self) -> String { self.models.clone() }
+
+    #[setter]
+    fn set_models(&mut self, v: &str) { self.models = v.to_string(); }
+
     /// Write the database to *path* as a directory.
     ///
     /// Only the inverted index is stored — the forward k-mer sets exist to build
@@ -513,6 +525,9 @@ impl Database {
                 "schema mismatch: query and target must share accession list, k and alphabet",
             ));
         }
+        self.schema_struct()
+            .compatible_with(&target.schema_struct())
+            .map_err(PyValueError::new_err)?;
 
         // Self-comparison: compute the strict upper triangle and mirror it. The
         // result is symmetric by construction (Jaccard, the shared-accession set
@@ -663,6 +678,9 @@ impl Database {
                 "schema mismatch: query and target must share accession list, k and alphabet",
             ));
         }
+        self.schema_struct()
+            .compatible_with(&target.schema_struct())
+            .map_err(PyValueError::new_err)?;
         if qi >= self.n_parts() || ti >= target.n_parts() {
             return Err(PyValueError::new_err(format!(
                 "block ({qi}, {ti}) is outside {} x {} partitions",
@@ -728,6 +746,9 @@ impl Database {
                 "schema mismatch: query and target must share accession list, k and alphabet",
             ));
         }
+        self.schema_struct()
+            .compatible_with(&target.schema_struct())
+            .map_err(PyValueError::new_err)?;
         if qi >= self.n_parts() || ti >= target.n_parts() {
             return Err(PyValueError::new_err(format!(
                 "block ({qi}, {ti}) is outside {} x {} partitions",
@@ -945,6 +966,7 @@ fn open_database(path: &str) -> PyResult<Database> {
         accessions: schema.accessions,
         filter_mode: schema.filter_mode,
         source: schema.source,
+        models: schema.models,
         manifest,
         alphabet_str: schema.alphabet,
         k: schema.k,

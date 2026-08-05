@@ -86,7 +86,8 @@ def preprocess(
     """
     paths = list(paths)
     out: list[GenomeRecord | None] = [None] * len(paths)
-    archive = Archive(archive_root, models.accessions) if archive_root else None
+    archive = (Archive(archive_root, models.accessions, models.fingerprint)
+               if archive_root else None)
     with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
         futures = {
             pool.submit(preprocess_one, p, models, mode, input_kind): i
@@ -125,7 +126,8 @@ def build_from_archive(
     defaults — needed to reproduce FastAAI 1 exactly, which included the stop
     codon `*` in its 21-symbol alphabet (see equivalence harness).
     """
-    from .archive import genome_names, read_hits, read_models, read_proteins
+    from .archive import (genome_names, read_fingerprint, read_hits, read_models,
+                          read_proteins)
 
     accessions = read_models(root)
     acc_index = {a: i for i, a in enumerate(accessions)}
@@ -155,6 +157,9 @@ def build_from_archive(
     for genome in sorted(resolved, key=lambda g: order.get(g, 1 << 30)):
         db.add_genome(genome, resolved[genome])
     db.seal()
+    # Carried through so a rebuild is as verifiable as the original build. An
+    # archive written before fingerprints existed yields "", meaning unknown.
+    db.models = read_fingerprint(root)
     return db
 
 
@@ -165,6 +170,9 @@ def build_database(
 ) -> tuple["_core.Database", list[GenomeRecord]]:
     """K-merise and seal. Genomes with no SCPs are excluded and returned separately."""
     db = _core.Database(models.accessions)
+    # Records which models these k-mers came from, so a later comparison can
+    # verify it rather than trust matching accession names.
+    db.models = models.fingerprint
     kept: list[GenomeRecord] = []
     skipped: list[GenomeRecord] = []
     for rec in records:
