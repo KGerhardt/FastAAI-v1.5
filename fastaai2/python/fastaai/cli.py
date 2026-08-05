@@ -30,6 +30,7 @@ import numpy as np
 from . import _core
 from .ingest import find_genomes
 from .pipeline import (
+    DEFAULT_BLOCK,
     DEFAULT_SEARCH_THREADS,
     build_database,
     build_from_archive,
@@ -154,6 +155,100 @@ def aai_matrix_value(aai, shared, jaccard) -> str:
     return label
 
 
+def _labels(aai, shared, jac):
+    """Vectorised `aai_label` over whole arrays.
+
+    Precedence must match the scalar version exactly: no measurement (`NA`)
+    outranks the floor, and the floor outranks the ceiling so that zero Jaccard
+    — which `log(0)` places above the ceiling — comes out `<30%`.
+    """
+    out = np.char.mod("%.2f", np.nan_to_num(aai, nan=0.0))
+    out[aai > AAI_CEILING] = LABEL_ABOVE
+    out[(jac == 0) | np.isnan(aai) | (aai < AAI_FLOOR)] = LABEL_BELOW
+    out[(shared == 0) | np.isnan(jac)] = "NA"
+    return out
+
+
+def block_name(qi: int, ti: int) -> str:
+    return f"block_q{qi:05d}_t{ti:05d}.tsv"
+
+
+def write_blocks(query, target, out_dir, threads, block, stdev, emit, resume=True,
+                 quiet=False):
+    """Write one file per (query partition x target partition).
+
+    The full matrix is never formed. Each file is bounded by the partition size
+    rather than by the size of either database, which is what makes an
+    all-vs-all at GTDB scale expressible at all.
+
+    Files are written to a temporary name and renamed, so a file that exists is
+    a file that is complete — that is what makes `resume` safe after a kill, and
+    what lets separate processes take different blocks.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    qn, tn = query.genome_names, target.genome_names
+    qoff = np.cumsum([0] + list(query.partition_genomes))
+    toff = np.cumsum([0] + list(target.partition_genomes))
+
+    cols = ["query", "target", "shared_scps"]
+    if emit in ("jaccard", "both"):
+        cols.append("jaccard")
+    if stdev:
+        cols.append("jaccard_sd")
+    if emit in ("aai", "both"):
+        cols.append("aai")
+    header = "\t".join(cols) + "\n"
+
+    written = skipped = 0
+    for qi in range(query.n_partitions):
+        for ti in range(target.n_partitions):
+            dest = out_dir / block_name(qi, ti)
+            if resume and dest.exists():
+                skipped += 1
+                continue
+
+            jb, sb, r, c, qb = query.search_block(target, qi, ti, block, threads, stdev)
+            jac = np.frombuffer(jb, dtype=np.float64).reshape(r, c)
+            sh = np.frombuffer(sb, dtype=np.uint32).reshape(r, c)
+            sd = np.frombuffer(qb, dtype=np.float64).reshape(r, c) if qb is not None else None
+            aai = _aai_from_jaccard(jac) if emit in ("aai", "both") else None
+
+            tmp = dest.with_suffix(".tsv.part")
+            with open(tmp, "w") as fh:
+                fh.write(header)
+                for i in range(r):
+                    qname = qn[qoff[qi] + i]
+                    lab = _labels(aai[i], sh[i], jac[i]) if aai is not None else None
+                    for j in range(c):
+                        row = [qname, tn[toff[ti] + j], str(sh[i, j])]
+                        if emit in ("jaccard", "both"):
+                            v = jac[i, j]
+                            row.append("NA" if np.isnan(v) else f"{v:.10g}")
+                        if stdev:
+                            v = sd[i, j]
+                            row.append("NA" if np.isnan(v) else f"{v:.6g}")
+                        if lab is not None:
+                            row.append(lab[j])
+                        fh.write("\t".join(row) + "\n")
+            tmp.replace(dest)
+            written += 1
+            if not quiet:
+                print(f"  {dest.name}  {r} x {c}", file=sys.stderr)
+
+    if not quiet:
+        print(f"{written} block(s) written, {skipped} already present", file=sys.stderr)
+    return written, skipped
+
+
+def _aai_from_jaccard(jac):
+    out = np.full(jac.shape, np.nan)
+    ok = np.isfinite(jac) & (jac > 0)
+    x = np.power(-0.2607023 * np.log(jac[ok]), 1.0 / 3.435)
+    out[ok] = (1.810741 * np.exp(-x) - 0.3087057) * 100.0
+    return out
+
+
 def _write(res, out_path, style, emit):
     has_sd = res.stdev is not None
     fh = open(out_path, "w") if out_path else sys.stdout
@@ -239,6 +334,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("-o", "--output", help="output TSV (default: stdout)")
     q.add_argument("--output_style", choices=("tsv", "matrix"), default="tsv")
     q.add_argument("--emit", choices=("aai", "jaccard", "both"), default="both")
+    q.add_argument("--blocks", metavar="DIR",
+                   help="write one TSV per query/target partition pair into DIR "
+                        "instead of one file; the full matrix is never held")
+    q.add_argument("--no-resume", action="store_true",
+                   help="with --blocks, recompute blocks whose file already exists")
     _common(q)
 
     m = sub.add_parser("merge", help="merge databases into one")
@@ -268,10 +368,34 @@ def cmd_build(args) -> int:
 
 def cmd_query(args) -> int:
     log = _log(args.quiet)
+
+    # Flags that change the output columns must never be dropped quietly.
+    if args.output_style == "matrix":
+        if args.do_stdev:
+            raise SystemExit("--do_stdev has no matrix representation: a cell holds "
+                             "one value. Use the default --output_style tsv.")
+        if args.emit != "both":
+            raise SystemExit(f"--emit {args.emit} is not available with "
+                             "--output_style matrix, which writes AAI only. "
+                             "Use --output_style tsv.")
+
     models = ModelSet(args.hmm) if args.hmm else None
     qdb = _load_or_build(args.query, models, args, log)
     same = not args.target or args.target == args.query
     tdb = qdb if same else _load_or_build(args.target, models, args, log)
+
+    if args.blocks:
+        if args.output_style == "matrix":
+            raise SystemExit("--blocks writes TSV; --output_style matrix does not apply.")
+        t0 = time.perf_counter()
+        written, skipped = write_blocks(
+            qdb, tdb, args.blocks, threads=args.threads, block=DEFAULT_BLOCK,
+            stdev=args.do_stdev, emit=args.emit, resume=not args.no_resume,
+            quiet=args.quiet,
+        )
+        log(f"blocks {time.perf_counter() - t0:.2f}s -> {args.blocks} "
+            f"({written} written, {skipped} skipped)")
+        return 0
 
     t0 = time.perf_counter()
     res = search(qdb, tdb, threads=args.threads, stdev=args.do_stdev)

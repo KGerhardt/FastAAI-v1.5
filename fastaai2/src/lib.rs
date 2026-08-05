@@ -47,7 +47,35 @@ pub struct Database {
     /// acting as *query* needs k-mer lists while a database acting as *target*
     /// needs the inverted index.
     sets: Vec<Vec<Vec<u32>>>,
+    /// Resident partitions. Populated by `seal`; empty for a database opened
+    /// from disk, which loads partitions on demand instead — see `part`.
     partitions: Vec<Partition>,
+    /// Partition files, when this database is backed by a directory. A database
+    /// far larger than RAM is searched by reloading these, never by holding
+    /// them all resident.
+    part_paths: Vec<std::path::PathBuf>,
+    /// Genomes per partition, taken from the manifest so that partition offsets
+    /// are known without reading a single partition file.
+    part_genomes: Vec<usize>,
+}
+
+/// A partition either borrowed from memory or loaded for this use alone.
+///
+/// The distinction is invisible to callers, which is the point: the same search
+/// code serves a database built in memory and one streamed from disk.
+enum PartRef<'a> {
+    Resident(&'a Partition),
+    Loaded(Box<Partition>),
+}
+
+impl std::ops::Deref for PartRef<'_> {
+    type Target = Partition;
+    fn deref(&self) -> &Partition {
+        match self {
+            PartRef::Resident(p) => p,
+            PartRef::Loaded(p) => p,
+        }
+    }
 }
 
 impl Database {
@@ -60,6 +88,53 @@ impl Database {
             filter_mode: self.filter_mode.clone(),
             source: self.source.clone(),
         }
+    }
+
+    /// Partition count, whichever way this database is backed.
+    fn n_parts(&self) -> usize {
+        if self.part_paths.is_empty() { self.partitions.len() } else { self.part_paths.len() }
+    }
+
+    fn sealed(&self) -> bool {
+        !self.partitions.is_empty() || !self.part_paths.is_empty()
+    }
+
+    /// Borrow partition *i*, reading it from disk if this database is not
+    /// resident. The caller drops it when done, so peak footprint is bounded by
+    /// the partitions actually in hand rather than by the size of the database.
+    fn part(&self, i: usize) -> std::io::Result<PartRef<'_>> {
+        if self.part_paths.is_empty() {
+            Ok(PartRef::Resident(&self.partitions[i]))
+        } else {
+            store::read_partition(&self.part_paths[i]).map(|p| PartRef::Loaded(Box::new(p)))
+        }
+    }
+
+    /// Genomes in each partition, and the running offset of each into the full
+    /// genome order. Reads no partition files.
+    fn offsets(&self) -> (Vec<usize>, usize) {
+        let counts: Vec<usize> = if self.part_paths.is_empty() {
+            self.partitions.iter().map(|p| p.n_genomes).collect()
+        } else {
+            self.part_genomes.clone()
+        };
+        let mut offs = Vec::with_capacity(counts.len());
+        let mut total = 0usize;
+        for c in counts {
+            offs.push(total);
+            total += c;
+        }
+        (offs, total)
+    }
+
+    /// Fold over every partition, one resident at a time.
+    fn fold_parts<T>(&self, init: T, mut f: impl FnMut(T, &Partition) -> T) -> std::io::Result<T> {
+        let mut acc = init;
+        for i in 0..self.n_parts() {
+            let p = self.part(i)?;
+            acc = f(acc, &p);
+        }
+        Ok(acc)
     }
 }
 
@@ -85,6 +160,8 @@ impl Database {
             names: Vec::new(),
             sets: Vec::new(),
             partitions: Vec::new(),
+            part_paths: Vec::new(),
+            part_genomes: Vec::new(),
         })
     }
 
@@ -164,7 +241,14 @@ impl Database {
 
     #[getter]
     fn n_partitions(&self) -> usize {
-        self.partitions.len()
+        self.n_parts()
+    }
+
+    /// True when partitions are read from disk per block rather than held
+    /// resident — the mode a database larger than RAM must be searched in.
+    #[getter]
+    fn is_streamed(&self) -> bool {
+        !self.part_paths.is_empty()
     }
 
     #[getter]
@@ -189,7 +273,7 @@ impl Database {
 
     #[getter]
     fn is_sealed(&self) -> bool {
-        !self.partitions.is_empty()
+        self.sealed()
     }
 
     #[getter]
@@ -203,41 +287,44 @@ impl Database {
     }
 
     /// Number of accessions carried by each genome, in `genome_names` order.
-    fn scp_counts(&self) -> Vec<usize> {
+    fn scp_counts(&self) -> PyResult<Vec<usize>> {
         // Presence flags in the inverted index carry this directly.
-        let mut out = Vec::with_capacity(self.names.len());
-        for p in &self.partitions {
+        self.fold_parts(Vec::with_capacity(self.names.len()), |mut out, p| {
             for g in 0..p.n_genomes {
                 out.push(p.accs.iter().filter(|a| a.present[g]).count());
             }
-        }
-        out
+            out
+        })
+        .map_err(to_py)
     }
 
-    /// Resident index footprint in bytes, or 0 if unsealed.
-    fn index_bytes(&self) -> usize {
-        self.partitions.iter().map(|p| p.index_bytes()).sum()
+    /// Index footprint in bytes, or 0 if unsealed. For a streamed database this
+    /// is what the index *would* occupy resident, not what it currently does.
+    fn index_bytes(&self) -> PyResult<usize> {
+        self.fold_parts(0usize, |a, p| a + p.index_bytes()).map_err(to_py)
     }
 
     /// What a dense k-mer index would have cost, for comparison.
-    fn dense_index_bytes(&self) -> usize {
-        self.partitions.iter().map(|p| p.dense_index_bytes()).sum()
+    fn dense_index_bytes(&self) -> PyResult<usize> {
+        self.fold_parts(0usize, |a, p| a + p.dense_index_bytes()).map_err(to_py)
     }
 
     /// Fraction of the k-mer space occupied, averaged over accessions and
     /// partitions. Below 0.5, sparse storage is the smaller layout.
-    fn occupancy(&self) -> f64 {
-        if self.partitions.is_empty() {
-            return 0.0;
+    fn occupancy(&self) -> PyResult<f64> {
+        let n = self.n_parts();
+        if n == 0 {
+            return Ok(0.0);
         }
-        self.partitions.iter().map(|p| p.occupancy()).sum::<f64>()
-            / self.partitions.len() as f64
+        let sum = self.fold_parts(0.0f64, |a, p| a + p.occupancy()).map_err(to_py)?;
+        Ok(sum / n as f64)
     }
 
     /// Resident bytes of the single largest partition — the figure that must fit
-    /// a per-thread RAM budget when partitions are streamed one at a time.
-    fn largest_partition_bytes(&self) -> usize {
-        self.partitions.iter().map(|p| p.index_bytes()).max().unwrap_or(0)
+    /// a per-thread RAM budget, since a streamed search holds at most the query
+    /// and target partitions of one block.
+    fn largest_partition_bytes(&self) -> PyResult<usize> {
+        self.fold_parts(0usize, |a, p| a.max(p.index_bytes())).map_err(to_py)
     }
 
     /// Compatibility key over the accession list, k and alphabet.
@@ -274,15 +361,22 @@ impl Database {
     /// it and nothing downstream reads them. Partitions are written as separate
     /// files so appending genomes later touches no existing partition.
     fn save(&self, path: &str) -> PyResult<()> {
-        if self.partitions.is_empty() {
+        if !self.sealed() {
             return Err(PyRuntimeError::new_err("database is not sealed"));
         }
         let dir = std::path::Path::new(path);
         std::fs::create_dir_all(dir).map_err(to_py)?;
         store::write_schema(dir, &self.schema_struct()).map_err(to_py)?;
         store::write_manifest(dir, &self.manifest).map_err(to_py)?;
-        for (i, p) in self.partitions.iter().enumerate() {
-            store::write_partition(&dir.join(store::partition_file(i)), p).map_err(to_py)?;
+        for i in 0..self.n_parts() {
+            let dest = dir.join(store::partition_file(i));
+            if self.part_paths.is_empty() {
+                store::write_partition(&dest, &self.partitions[i]).map_err(to_py)?;
+            } else if self.part_paths[i] != dest {
+                // Streamed: the bytes on disk are already the ones we would
+                // write, so copy rather than round-tripping through RAM.
+                std::fs::copy(&self.part_paths[i], &dest).map_err(to_py)?;
+            }
         }
         Ok(())
     }
@@ -321,7 +415,7 @@ impl Database {
         stdev: bool,
     ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize, usize,
                    Option<Bound<'py, PyBytes>>)> {
-        if self.partitions.is_empty() || target.partitions.is_empty() {
+        if !self.sealed() || !target.sealed() {
             return Err(PyRuntimeError::new_err("both databases must be sealed"));
         }
         if self.schema_key() != target.schema_key() {
@@ -335,26 +429,38 @@ impl Database {
         // and the mean over it are all symmetric), so half the work is redundant.
         let selfcmp = std::ptr::eq(self as *const Database, target as *const Database);
 
-        let (qoffs, nq) = kernel::partition_offsets(&self.partitions);
-        let (toffs, nt) = kernel::partition_offsets(&target.partitions);
+        let (qoffs, nq) = self.offsets();
+        let (toffs, nt) = target.offsets();
         let mut jac = vec![0.0f64; nq * nt];
         let mut sh = vec![0u32; nq * nt];
         // Only allocated when asked: at 2,943 genomes this is another 69 MB.
         let mut sq = if stdev { vec![0.0f64; nq * nt] } else { Vec::new() };
 
-        py.detach(|| {
-            for (qi, qp) in self.partitions.iter().enumerate() {
-                for (ti, tp) in target.partitions.iter().enumerate() {
+        let outcome: std::io::Result<()> = py.detach(|| {
+            for qi in 0..self.n_parts() {
+                // One load per outer block; the inner side reloads beneath it.
+                // Peak footprint is these two partitions, never the database.
+                let qp = self.part(qi)?;
+                for ti in 0..target.n_parts() {
                     if selfcmp && ti < qi {
                         continue; // mirrored from the (ti, qi) block below
                     }
+                    let tp = if selfcmp && ti == qi {
+                        None // same partition; reuse `qp` rather than load it twice
+                    } else {
+                        Some(target.part(ti)?)
+                    };
+                    let tp: &Partition = match &tp {
+                        Some(p) => p,
+                        None => &qp,
+                    };
                     let sym = selfcmp && ti == qi;
                     let cells = qp.n_genomes * tp.n_genomes;
                     let mut j = vec![0.0f64; cells];
                     let mut s = vec![0u32; cells];
                     let mut q = if stdev { vec![0.0f64; cells] } else { Vec::new() };
                     kernel::join_threaded(
-                        qp, tp, block, threads, sym, &mut j, &mut s,
+                        &qp, tp, block, threads, sym, &mut j, &mut s,
                         if stdev { Some(&mut q) } else { None },
                     );
                     for r in 0..qp.n_genomes {
@@ -381,7 +487,8 @@ impl Database {
                     }
                 }
                 let mut g = 0usize;
-                for p in &self.partitions {
+                for i in 0..self.n_parts() {
+                    let p = self.part(i)?;
                     for local in 0..p.n_genomes {
                         let k = p.accs.iter().filter(|a| a.present[local]).count() as u32;
                         jac[g * nt + g] = k as f64;
@@ -400,6 +507,128 @@ impl Database {
                 }
             }
             for i in 0..jac.len() {
+                jac[i] = if sh[i] == 0 { f64::NAN } else { jac[i] / sh[i] as f64 };
+            }
+            Ok(())
+        });
+        outcome.map_err(to_py)?;
+
+        let jb = PyBytes::new(py, unsafe {
+            std::slice::from_raw_parts(jac.as_ptr() as *const u8, jac.len() * 8)
+        });
+        let sb = PyBytes::new(py, unsafe {
+            std::slice::from_raw_parts(sh.as_ptr() as *const u8, sh.len() * 4)
+        });
+        let qb = if stdev {
+            Some(PyBytes::new(py, unsafe {
+                std::slice::from_raw_parts(sq.as_ptr() as *const u8, sq.len() * 8)
+            }))
+        } else {
+            None
+        };
+        Ok((jb, sb, nq, nt, qb))
+    }
+
+    /// Genomes in each partition, in partition order.
+    ///
+    /// Lets a caller slice `genome_names` per block without opening a partition.
+    #[getter]
+    fn partition_genomes(&self) -> Vec<usize> {
+        if self.part_paths.is_empty() {
+            self.partitions.iter().map(|p| p.n_genomes).collect()
+        } else {
+            self.part_genomes.clone()
+        }
+    }
+
+    /// Search one query partition against one target partition.
+    ///
+    /// The unit a large search is actually made of. Each block is independent:
+    /// it holds two partitions and a `q x t` result, both bounded by
+    /// `PARTITION_SIZE` rather than by the size of either database, and it can
+    /// be computed in any order or by any process. That is what makes an
+    /// all-vs-all at GTDB scale expressible — the full matrix never exists.
+    ///
+    /// Results are final, not partial sums: the mean over shared accessions is
+    /// already taken. A self-block (same database, `qi == ti`) computes its own
+    /// upper triangle, mirrors it and fills its diagonal, so it needs nothing
+    /// from any other block.
+    #[pyo3(signature = (target, qi, ti, block = 128, threads = 1, stdev = false))]
+    fn search_block<'py>(
+        &self,
+        py: Python<'py>,
+        target: &Database,
+        qi: usize,
+        ti: usize,
+        block: usize,
+        threads: usize,
+        stdev: bool,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize, usize,
+                   Option<Bound<'py, PyBytes>>)> {
+        if !self.sealed() || !target.sealed() {
+            return Err(PyRuntimeError::new_err("both databases must be sealed"));
+        }
+        if self.schema_key() != target.schema_key() {
+            return Err(PyValueError::new_err(
+                "schema mismatch: query and target must share accession list, k and alphabet",
+            ));
+        }
+        if qi >= self.n_parts() || ti >= target.n_parts() {
+            return Err(PyValueError::new_err(format!(
+                "block ({qi}, {ti}) is outside {} x {} partitions",
+                self.n_parts(), target.n_parts()
+            )));
+        }
+
+        // Symmetric only when this is literally the same partition of the same
+        // database. Block (qi, ti) and (ti, qi) of a self-search are transposes,
+        // but each is written independently, so neither is skipped here.
+        let selfblock = std::ptr::eq(self as *const Database, target as *const Database)
+            && qi == ti;
+
+        let qp = self.part(qi).map_err(to_py)?;
+        let tp = if selfblock { None } else { Some(target.part(ti).map_err(to_py)?) };
+        let tpr: &Partition = match &tp {
+            Some(p) => p,
+            None => &qp,
+        };
+
+        let (nq, nt) = (qp.n_genomes, tpr.n_genomes);
+        let cells = nq * nt;
+        let mut jac = vec![0.0f64; cells];
+        let mut sh = vec![0u32; cells];
+        let mut sq = if stdev { vec![0.0f64; cells] } else { Vec::new() };
+
+        py.detach(|| {
+            kernel::join_threaded(
+                &qp, tpr, block, threads, selfblock, &mut jac, &mut sh,
+                if stdev { Some(&mut sq) } else { None },
+            );
+            if selfblock {
+                for i in 0..nq {
+                    for t in (i + 1)..nt {
+                        jac[t * nt + i] = jac[i * nt + t];
+                        sh[t * nt + i] = sh[i * nt + t];
+                        if stdev {
+                            sq[t * nt + i] = sq[i * nt + t];
+                        }
+                    }
+                }
+                for local in 0..nq {
+                    let k = qp.accs.iter().filter(|a| a.present[local]).count() as u32;
+                    jac[local * nt + local] = k as f64;
+                    sh[local * nt + local] = k;
+                    if stdev {
+                        sq[local * nt + local] = k as f64;
+                    }
+                }
+            }
+            if stdev {
+                for i in 0..cells {
+                    sq[i] = kernel::stdev_from(jac[i], sq[i], sh[i]);
+                }
+            }
+            for i in 0..cells {
                 jac[i] = if sh[i] == 0 { f64::NAN } else { jac[i] / sh[i] as f64 };
             }
         });
@@ -427,10 +656,10 @@ fn to_py(e: std::io::Error) -> PyErr {
 
 /// Open a database written by `Database.save`.
 ///
-/// Reads schema, manifest and every partition. Partitions are separate files so
-/// lazy per-partition loading is a later change that needs no format revision —
-/// which is what a GTDB-scale database will want, since only one partition needs
-/// to be resident at a time.
+/// Reads schema and manifest only. Partitions stay on disk and are loaded per
+/// block during a search, so opening a GTDB-scale database costs neither the
+/// time nor the memory of reading it: peak footprint is the query and target
+/// partitions of one block, not the whole index.
 #[pyfunction]
 fn open_database(path: &str) -> PyResult<Database> {
     let dir = std::path::Path::new(path);
@@ -440,17 +669,34 @@ fn open_database(path: &str) -> PyResult<Database> {
         .map_err(PyValueError::new_err)?;
     let kspace = alpha.kspace as usize;
 
-    let mut partitions = Vec::new();
-    for p in store::partition_paths(dir).map_err(to_py)? {
-        let part = store::read_partition(&p).map_err(to_py)?;
+    let part_paths = store::partition_paths(dir).map_err(to_py)?;
+
+    // Genomes per partition, from the manifest — so a search knows its output
+    // shape without opening a partition file.
+    let mut part_genomes = vec![0usize; part_paths.len()];
+    for m in &manifest {
+        let p = m.partition as usize;
+        if p >= part_genomes.len() {
+            return Err(PyRuntimeError::new_err(format!(
+                "manifest references partition {p} but only {} exist",
+                part_paths.len()
+            )));
+        }
+        part_genomes[p] += 1;
+    }
+
+    // Check the first partition against the schema now rather than mid-search.
+    // A mismatched model set produces structurally valid, meaningless output, so
+    // it must fail at open.
+    if let Some(first) = part_paths.first() {
+        let part = store::read_partition(first).map_err(to_py)?;
         if part.n_acc != schema.accessions.len() || part.kspace != kspace {
             return Err(PyRuntimeError::new_err(format!(
                 "{}: partition disagrees with schema ({} accessions / kspace {} \
                  vs {} / {})",
-                p.display(), part.n_acc, part.kspace, schema.accessions.len(), kspace
+                first.display(), part.n_acc, part.kspace, schema.accessions.len(), kspace
             )));
         }
-        partitions.push(part);
     }
 
     let names = manifest.iter().map(|m| m.name.clone()).collect();
@@ -465,7 +711,9 @@ fn open_database(path: &str) -> PyResult<Database> {
         kmerizer: Kmerizer::new(alpha),
         names,
         sets: Vec::new(), // forward sets are not stored and are never needed
-        partitions,
+        partitions: Vec::new(), // streamed: see `part_paths`
+        part_paths,
+        part_genomes,
     })
 }
 
