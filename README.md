@@ -189,12 +189,6 @@ res.aai       # (n, n) float64, uncensored
 
 ## Notes
 
-**The model set defines the accession list.** Accession IDs are positions in the
-HMM file's order; there is no compiled-in Pfam set. Two databases may only be
-compared when accession list, `k` and alphabet all match, and `search` refuses
-otherwise — mismatched model sets produce structurally valid, biologically
-meaningless output.
-
 **Model identity is verified, not assumed.** Matching accession names and order
 do not establish that two databases were built from the same HMMs: a model
 revised between Pfam releases keeps its name, accession and position while
