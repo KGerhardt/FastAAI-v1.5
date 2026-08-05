@@ -1200,6 +1200,45 @@ assembling one.
 
 ---
 
+## 4.7 Planned: standard deviation of Jaccard across shared SCPs
+
+v1 emitted a `jacc_SD` column. FastAAI 2 does not yet, and the CLI **warns**
+rather than dropping it silently, because a caller passing `--do_stdev` asked for
+output that would otherwise just be absent.
+
+It is worth restoring on its own merits, not only for parity: a pair at AAI 65%
+with a tight spread across markers means something different from the same mean
+carried by two markers at 0.9 with the rest near 0.02 — a contamination or HGT
+signature the mean alone hides.
+
+**Algorithm: sum of squares, not a materialised matrix.** v1 built the full
+`(nSCP x M)` Jaccard matrix per query, subtracted the mean and squared it
+(`fastaai.py:1948`, `2820`), holding 122 x 2,943 x 8 B ~ 2.9 MB per query. That
+is unnecessary — variance needs `E[j^2] - (E[j])^2`, so two accumulators suffice
+regardless of accession count:
+
+```rust
+let j = i as f64 / denom as f64;
+jaccard[dst + t]    += j;
+jaccard_sq[dst + t] += j * j;   // the only addition to the fold
+```
+
+| | v1 | planned |
+|---|---|---|
+| per-query working set | `nSCP x M` | `2 x M` |
+| output at 2,943 genomes | — | 69 MB -> 138 MB |
+| extra work in the fold | second pass over the matrix | one multiply-add |
+
+**Precision.** The usual objection to sum-of-squares is catastrophic
+cancellation, and it does not bite here: Jaccard is bounded to [0, 1] and real
+values run ~0.09 with spread ~0.005, so `E[j^2]` ~ 0.008125 against `(E[j])^2` ~
+0.0081 — about 2.5 significant digits lost from f64's 16. Welford would avoid it
+but costs a division per element, which is not free in a fold that is ~10% of
+runtime. **Clamp the variance at zero**: near-identical per-accession Jaccards
+can round negative.
+
+---
+
 ## 5. Output
 
 **The native output is the block set plus the manifest, not a dense matrix.**
