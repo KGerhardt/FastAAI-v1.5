@@ -13,8 +13,6 @@ from fastaai import _core
 from fastaai.cli import (
     LEGACY_MODULES,
     _reroute,
-    aai_label,
-    aai_matrix_value,
     build_parser,
     main,
 )
@@ -200,44 +198,58 @@ def test_parser_exposes_three_verbs():
 
 # --- AAI reporting band -------------------------------------------------------
 #
-# `<30%` and `>90%` are categorical results: outside that band the Jaccard->AAI
-# regression has no sensitivity, so a number there would assert precision the
-# estimator does not have. These are not display preferences and must not be
-# silently replaced by a figure.
+# The labels themselves are unit-tested in src/report.rs, which owns the
+# formatting. These go through the writer, which is what a user actually sees.
 
-def test_aai_outside_the_band_is_labelled_not_numbered():
-    assert aai_label(19.0, shared=50, jaccard=0.001) == "<30%"
-    assert aai_label(97.3, shared=50, jaccard=0.95) == ">90%"
-
-
-def test_aai_inside_the_band_is_a_number():
-    assert aai_label(44.72, shared=50, jaccard=0.2) == "44.72"
-
-
-def test_band_edges_stay_numeric():
-    # Strict comparisons: 30 and 90 are inside the usable band.
-    assert aai_label(30.0, shared=50, jaccard=0.006) == "30.00"
-    assert aai_label(90.0, shared=50, jaccard=0.843) == "90.00"
+def _band_db(tmp_path):
+    """Three genomes spanning the band: identical, divergent, and disjoint."""
+    db = fastaai.Database(["a0", "a1", "a2"])
+    db.add_genome("same_a", [(0, b"MKVLAATTGGHHIKLMNPQRS"), (1, b"PQRSTVWYACDEFGHIKLMN")])
+    db.add_genome("same_b", [(0, b"MKVLAATTGGHHIKLMNPQRS"), (1, b"PQRSTVWYACDEFGHIKLMN")])
+    db.add_genome("far_c", [(2, b"WWWWCCCCYYYYFFFFMMMM")])
+    db.seal()
+    db.filter_mode = "v1"
+    p = str(tmp_path / "band")
+    db.save(p)
+    return p
 
 
-def test_zero_jaccard_is_below_the_floor_not_above_the_ceiling():
-    """log(0) lands at the top of the regression; it must be caught first.
-
-    Genomes sharing markers but no k-mers are maximally dissimilar. Reporting
-    them as >90% would invert the result.
-    """
-    assert aai_label(float("nan"), shared=50, jaccard=0.0) == "<30%"
-
-
-def test_no_shared_markers_is_NA_not_a_low_score():
-    assert aai_label(float("nan"), shared=0, jaccard=float("nan")) == "N/A"
+def _cells(path, col):
+    out = {}
+    for line in path.read_text().splitlines()[1:]:
+        f = line.split("\t")
+        out[(f[0], f[1])] = f[col]
+    return out
 
 
-def test_matrix_carries_v1_sentinels_since_a_cell_cannot_hold_a_string():
-    assert aai_matrix_value(19.0, shared=50, jaccard=0.001) == "15.0"
-    assert aai_matrix_value(97.3, shared=50, jaccard=0.95) == "95.0"
-    assert aai_matrix_value(44.72, shared=50, jaccard=0.2) == "44.72"
-    assert aai_matrix_value(float("nan"), shared=0, jaccard=float("nan")) == "N/A"
+def test_the_band_is_reported_categorically(tmp_path):
+    p = _band_db(tmp_path)
+    out = tmp_path / "o.tsv"
+    main(["query", "-q", p, "-o", str(out), "--quiet"])
+    aai = _cells(out, 6)
+    assert aai[("same_a", "same_b")] == ">90%"
+
+
+def test_a_pair_sharing_nothing_is_not_a_low_score(tmp_path):
+    p = _band_db(tmp_path)
+    out = tmp_path / "o.tsv"
+    main(["query", "-q", p, "-o", str(out), "--quiet"])
+    row = _cells(out, 6)
+    assert row[("same_a", "far_c")] == "N/A"
+    # ...and every value column agrees it was not measured.
+    for col in (2, 3, 4, 5, 6):
+        assert _cells(out, col)[("same_a", "far_c")] == "N/A"
+
+
+def test_matrix_carries_v1_sentinels_since_a_cell_cannot_hold_a_string(tmp_path):
+    p = _band_db(tmp_path)
+    out = tmp_path / "o.matrix"
+    main(["query", "-q", p, "-o", str(out), "--output_style", "matrix", "--quiet"])
+    lines = out.read_text().splitlines()
+    assert lines[0].split("\t") == ["query_genome", "same_a", "same_b", "far_c"]
+    cells = dict(zip(lines[0].split("\t")[1:], lines[1].split("\t")[1:]))
+    assert cells["same_b"] == "95.0"
+    assert cells["far_c"] == "N/A", "v1 writes 0; that cannot be told from a measurement"
 
 
 def test_absent_optional_v1_flags_do_not_reach_argv():

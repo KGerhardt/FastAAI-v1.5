@@ -25,8 +25,6 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-
 from . import _core
 from .ingest import find_genomes
 from .pipeline import (
@@ -35,7 +33,6 @@ from .pipeline import (
     build_database,
     build_from_archive,
     preprocess,
-    search,
 )
 from .search import DEFAULT_FILTER, ModelSet
 
@@ -107,62 +104,13 @@ def _load_or_build(source, models, args, log) -> "_core.Database":
     return db
 
 
-#: The band the Jaccard->AAI regression has sensitivity across. Outside it the
-#: estimate cannot support a specific figure, so the output says so categorically
-#: rather than printing a number that would assert precision it does not have.
-#: These are labels about the limits of the estimator, not display preferences,
-#: and they are not optional (v1 fastaai.py:2327-2338).
-AAI_FLOOR = 30.0
-AAI_CEILING = 90.0
-LABEL_BELOW = "<30%"
-LABEL_ABOVE = ">90%"
-
-#: A matrix cell cannot hold a string, so the two categories carry v1's sentinel
-#: values there instead (v1 README: "reports these categorical estimates with
-#: 15.0 and 95.0 AAI, respectively").
-MATRIX_BELOW = 15.0
-MATRIX_ABOVE = 95.0
+def block_name(qi: int, ti: int, style: str = "tsv") -> str:
+    suffix = "matrix" if style == "matrix" else "tsv"
+    return f"block_q{qi:05d}_t{ti:05d}.{suffix}"
 
 
-def aai_label(aai, shared, jaccard) -> str:
-    """Format one AAI estimate, categorically where the regression cannot resolve.
-
-    Zero Jaccard is the case that needs naming: `log(0)` sends it to the top of
-    the regression, so it must be caught before the ceiling test or two genomes
-    with nothing in common report as >90%. v1 carries the same correction.
-
-    No shared markers stays `NA`. "These genomes share no SCP" is not a claim
-    that their AAI is below 30% — it is the absence of a measurement.
-    """
-    if shared == 0 or (jaccard is not None and np.isnan(jaccard)):
-        return "N/A"
-    if (jaccard is not None and jaccard == 0) or np.isnan(aai) or aai < AAI_FLOOR:
-        return LABEL_BELOW
-    if aai > AAI_CEILING:
-        return LABEL_ABOVE
-    return f"{aai:.2f}"
-
-
-def aai_matrix_value(aai, shared, jaccard) -> str:
-    """Matrix-format counterpart to `aai_label`, using v1's numeric sentinels."""
-    label = aai_label(aai, shared, jaccard)
-    if label == "N/A":
-        # v1 writes 0 here. It reports "these genomes were never compared" as an
-        # AAI of zero, which a reader cannot distinguish from a real measurement
-        # of zero, so this is a deliberate departure.
-        return "N/A"
-    if label == LABEL_BELOW:
-        return f"{MATRIX_BELOW:.1f}"
-    if label == LABEL_ABOVE:
-        return f"{MATRIX_ABOVE:.1f}"
-    return label
-
-
-def block_name(qi: int, ti: int) -> str:
-    return f"block_q{qi:05d}_t{ti:05d}.tsv"
-
-
-def write_blocks(query, target, out_path, threads, block, stdev, emit, quiet=False):
+def write_blocks(query, target, out_path, threads, block, stdev, emit,
+                 style="tsv", quiet=False):
     """Write results as one file per (query partition x target partition).
 
     The only output path. A search whose two sides each fit one partition is
@@ -182,7 +130,7 @@ def write_blocks(query, target, out_path, threads, block, stdev, emit, quiet=Fal
 
     if grid == 1:
         rows, compute = query.write_block(target, 0, 0, out_path or "-", block,
-                                          threads, stdev, emit)
+                                          threads, stdev, emit, style)
         if not quiet:
             print(f"  {rows:,} rows", file=sys.stderr)
         return rows, compute
@@ -196,9 +144,9 @@ def write_blocks(query, target, out_path, threads, block, stdev, emit, quiet=Fal
     out_dir.mkdir(parents=True, exist_ok=True)
     for qi in range(query.n_partitions):
         for ti in range(target.n_partitions):
-            dest = out_dir / block_name(qi, ti)
+            dest = out_dir / block_name(qi, ti, style)
             n, secs = query.write_block(target, qi, ti, str(dest), block, threads,
-                                        stdev, emit)
+                                        stdev, emit, style)
             rows += n
             compute += secs
             if not quiet:
@@ -207,28 +155,6 @@ def write_blocks(query, target, out_path, threads, block, stdev, emit, quiet=Fal
     if not quiet:
         print(f"{grid} blocks written ({rows:,} rows)", file=sys.stderr)
     return rows, compute
-
-
-def _write(res, out_path, style, emit):
-    """Matrix output only.
-
-    TSV goes through `write_blocks`, which is the single writer for it — one
-    formatter, in Rust, for every TSV this program emits. A matrix is a
-    different shape rather than a different format: one dense array of every
-    pair, so it exists only for searches small enough to hold one.
-    """
-    assert style == "matrix", style
-    aai, shared, jacc = res.aai, res.shared, res.jaccard
-    fh = open(out_path, "w") if out_path else sys.stdout
-    try:
-        fh.write("query_genome\t" + "\t".join(res.target_names) + "\n")
-        for i, qn in enumerate(res.query_names):
-            row = [aai_matrix_value(aai[i, j], shared[i, j], jacc[i, j])
-                   for j in range(len(res.target_names))]
-            fh.write(qn + "\t" + "\t".join(row) + "\n")
-    finally:
-        if out_path:
-            fh.close()
 
 
 def _common(p):
@@ -325,24 +251,10 @@ def cmd_query(args) -> int:
 
     pairs = qdb.n_genomes * tdb.n_genomes
     t0 = time.perf_counter()
-    compute = None
-
-    if args.output_style == "matrix":
-        # A matrix is one dense array of every pair, so it exists only for
-        # searches small enough to hold one.
-        if qdb.n_partitions * tdb.n_partitions > 1:
-            raise SystemExit(
-                f"--output_style matrix needs the whole result in memory, and this "
-                f"search is {qdb.n_partitions} x {tdb.n_partitions} partitions. "
-                "Use the default TSV output."
-            )
-        res = search(qdb, tdb, threads=args.threads, stdev=args.do_stdev)
-        _write(res, args.output, args.output_style, args.emit)
-    else:
-        _rows, compute = write_blocks(
-            qdb, tdb, args.output, threads=args.threads, block=DEFAULT_BLOCK,
-            stdev=args.do_stdev, emit=args.emit, quiet=args.quiet)
-
+    _rows, compute = write_blocks(
+        qdb, tdb, args.output, threads=args.threads, block=DEFAULT_BLOCK,
+        stdev=args.do_stdev, emit=args.emit, style=args.output_style,
+        quiet=args.quiet)
     dt = time.perf_counter() - t0
     # Throughput is the kernel's, per thread — not aggregated over the job and
     # not diluted by formatting and disk. Per thread is what compares across

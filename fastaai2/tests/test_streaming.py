@@ -194,11 +194,28 @@ def test_a_multi_block_search_refuses_to_write_to_one_file(tmp_path, multipart):
         main(["query", "-q", q, "-t", multipart, "--quiet"])
 
 
-def test_matrix_refuses_a_search_it_cannot_hold(tmp_path, multipart):
+def test_matrix_is_written_per_block_like_the_tsv(tmp_path, multipart):
+    """A matrix is a Q x T grid for one partition pair, not for the whole search.
+
+    Nothing about it needs the full result, so it is not restricted to searches
+    that would fit in memory.
+    """
     q = _saved(tmp_path, "q", 3, start=90_000)
-    with pytest.raises(SystemExit):
-        main(["query", "-q", q, "-t", multipart, "-o", str(tmp_path / "m"),
-              "--output_style", "matrix", "--quiet"])
+    out = tmp_path / "mblocks"
+    main(["query", "-q", q, "-t", multipart, "-o", str(out),
+          "--output_style", "matrix", "--quiet"])
+
+    files = sorted(out.glob("*.matrix"))
+    assert [f.name for f in files] == [block_name(0, 0, "matrix"),
+                                       block_name(0, 1, "matrix")]
+
+    target = fastaai.open_database(multipart)
+    widths = target.partition_genomes
+    for f, width in zip(files, widths):
+        lines = f.read_text().splitlines()
+        assert lines[0].split("\t")[0] == "query_genome"
+        assert len(lines[0].split("\t")) == width + 1, "one column per target"
+        assert len(lines) == 1 + 3, "header plus one row per query genome"
 
 
 def test_a_partial_result_never_looks_complete(tmp_path):

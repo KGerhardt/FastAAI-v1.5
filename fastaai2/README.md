@@ -64,8 +64,9 @@ Jaccard and its SD at 4 dp, AAI at 2. `jacc_SD` is always present and reads
 counts. A pair sharing no marker is `N/A` throughout.
 
 `--output_style matrix` writes a Q×T grid of AAI with `query_genome` in the
-corner and v1's `15.0` / `95.0` sentinels for the categorical labels. It holds
-the whole result in memory, so it serves only single-partition-pair searches.
+corner and v1's `15.0` / `95.0` sentinels for the categorical labels. Like the
+TSV it is written per block — each file is the grid for one partition pair — so
+it carries no size restriction.
 
 ## Design notes that are easy to get wrong
 

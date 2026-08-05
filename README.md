@@ -135,9 +135,10 @@ digit: Jaccard and its standard deviation to 4 decimal places, AAI to 2.
 
 **`--output_style matrix`** writes a Q×T grid of AAI — one row per query, one
 column per target, `query_genome` in the corner — with v1's `15.0` and `95.0`
-standing in for the two categorical labels, since a cell cannot hold a string. It
-needs the whole result in memory, so it is available only for searches of a
-single partition pair; anything larger is refused rather than silently truncated.
+standing in for the two categorical labels, since a cell cannot hold a string.
+
+It is written per block exactly as the TSV is: each file is the Q×T grid for one
+partition pair, not for the whole search, so it carries no size restriction.
 
 Two deliberate departures from v1: a pair sharing no marker is `N/A` in the
 matrix where v1 writes `0`, which cannot be told from a real measurement of

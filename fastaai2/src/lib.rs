@@ -705,7 +705,7 @@ impl Database {
     /// folding formatting and disk into it would understate the engine while
     /// pretending to measure it.
     #[pyo3(signature = (target, qi, ti, path, block = 128, threads = 1,
-                        stdev = false, emit = "both"))]
+                        stdev = false, emit = "both", style = "tsv"))]
     #[allow(clippy::too_many_arguments)]
     fn write_block(
         &self,
@@ -718,6 +718,7 @@ impl Database {
         threads: usize,
         stdev: bool,
         emit: &str,
+        style: &str,
     ) -> PyResult<(usize, f64)> {
         if !self.sealed() || !target.sealed() {
             return Err(PyRuntimeError::new_err("both databases must be sealed"));
@@ -740,6 +741,15 @@ impl Database {
             other => {
                 return Err(PyValueError::new_err(format!(
                     "emit must be one of aai, jaccard, both (got {other})"
+                )))
+            }
+        };
+        let matrix = match style {
+            "tsv" => false,
+            "matrix" => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "style must be tsv or matrix (got {other})"
                 )))
             }
         };
@@ -770,6 +780,40 @@ impl Database {
                     std::fs::File::create(&tmp)?,
                 ))
             };
+
+            if matrix {
+                // A Q x T grid for this partition pair, exactly as the TSV is a
+                // Q x T listing for it. Nothing here needs the whole result, so
+                // matrix output is not limited to searches that would fit one.
+                let mut line = String::with_capacity(16 * nt);
+                line.push_str("query_genome");
+                for c in 0..nt {
+                    line.push('\t');
+                    line.push_str(&target.names[tstart + c]);
+                }
+                line.push('\n');
+                std::io::Write::write_all(&mut w, line.as_bytes())?;
+
+                for r in 0..nq {
+                    line.clear();
+                    line.push_str(&self.names[qstart + r]);
+                    for c in 0..nt {
+                        let idx = r * nt + c;
+                        let j = jac[idx];
+                        line.push('\t');
+                        report::aai_matrix_cell(&mut line, aai::kaai_to_aai(j),
+                                                sh[idx], j);
+                    }
+                    line.push('\n');
+                    std::io::Write::write_all(&mut w, line.as_bytes())?;
+                }
+                std::io::Write::flush(&mut w)?;
+                drop(w);
+                if !to_stdout {
+                    std::fs::rename(&tmp, &dest)?;
+                }
+                return Ok((nq * nt, compute));
+            }
 
             // FastAAI 1's columns, names and order. `jacc_SD` is always present
             // and reads N/A when it was not asked for, exactly as v1 does, so a

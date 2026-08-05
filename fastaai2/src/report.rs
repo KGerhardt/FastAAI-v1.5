@@ -57,6 +57,27 @@ pub fn aai_label(out: &mut String, aai: f64, shared: u32, jac: f64) {
     }
 }
 
+/// A matrix cell cannot hold a string, so the two categorical labels carry
+/// FastAAI 1's sentinel values there instead.
+pub const MATRIX_BELOW: f64 = 15.0;
+pub const MATRIX_ABOVE: f64 = 95.0;
+
+/// One AAI cell of a matrix.
+///
+/// v1 writes 0 where a pair shares no marker, which a reader cannot tell from a
+/// real measurement of zero. This writes `N/A` — a deliberate departure, and the
+/// only one in the matrix format.
+pub fn aai_matrix_cell(out: &mut String, aai: f64, shared: u32, jac: f64) {
+    let mut label = String::new();
+    aai_label(&mut label, aai, shared, jac);
+    match label.as_str() {
+        NO_HIT => out.push_str(NO_HIT),
+        LABEL_BELOW => fmt_py_round(out, MATRIX_BELOW, 1),
+        LABEL_ABOVE => fmt_py_round(out, MATRIX_ABOVE, 1),
+        other => out.push_str(other),
+    }
+}
+
 /// Python's `%.{sig}g`, which is what the single-file writer uses.
 ///
 /// Reimplemented rather than approximated with `{:.n}`: `%g` switches to
