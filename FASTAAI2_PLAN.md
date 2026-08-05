@@ -1200,11 +1200,11 @@ assembling one.
 
 ---
 
-## 4.7 Planned: standard deviation of Jaccard across shared SCPs
+## 4.7 MEASURED: standard deviation of Jaccard across shared SCPs
 
-v1 emitted a `jacc_SD` column. FastAAI 2 does not yet, and the CLI **warns**
-rather than dropping it silently, because a caller passing `--do_stdev` asked for
-output that would otherwise just be absent.
+**Implemented**, opt-in via `--do_stdev`. Costs 1.12x search time and one extra
+output-width array (another 69 MB at 2,943 genomes), so it is off by default
+rather than always paid for.
 
 It is worth restoring on its own merits, not only for parity: a pair at AAI 65%
 with a tight spread across markers means something different from the same mean
@@ -1234,8 +1234,18 @@ cancellation, and it does not bite here: Jaccard is bounded to [0, 1] and real
 values run ~0.09 with spread ~0.005, so `E[j^2]` ~ 0.008125 against `(E[j])^2` ~
 0.0081 — about 2.5 significant digits lost from f64's 16. Welford would avoid it
 but costs a division per element, which is not free in a fold that is ~10% of
-runtime. **Clamp the variance at zero**: near-identical per-accession Jaccards
-can round negative.
+runtime. **The variance is clamped at zero**: identical genomes give Jaccard 1.0
+on every marker, which rounds negative and would yield NaN. Both the agreement
+with a direct per-accession computation (to 1e-9) and the clamp are tested.
+
+**Interpretation caveat.** Measured over 2,943 Firmicutes, `corr(mean Jaccard,
+sd) = 0.935` — spread tracks the mean closely, because Jaccard is bounded at both
+ends and extreme means mechanically compress it (sd ranges 0.0141 to 0.3021,
+median 0.0774). The raw column is therefore largely redundant with the mean, and
+the informative quantity is the **residual after conditioning on AAI**: a pair
+whose spread is high *for its band* is the contamination or HGT candidate. The
+column stays raw, matching v1 and staying reproducible, but nothing should
+threshold on it directly.
 
 ---
 

@@ -82,11 +82,20 @@ def test_unknown_module_is_an_error():
 
 # --------------------------------------------------------------- retired flags
 
-def test_do_stdev_warns(tmp_path, capsys):
-    p, _ = _db(tmp_path, "a")
-    main(["query", "-q", p, "--do_stdev", "-o", str(tmp_path / "o.tsv")])
-    err = capsys.readouterr().err
-    assert "do_stdev" in err and "NOT implemented" in err
+def test_do_stdev_adds_a_column(tmp_path):
+    p, _ = _db(tmp_path, "a", n=3)
+    out = tmp_path / "o.tsv"
+    main(["query", "-q", p, "--do_stdev", "-o", str(out), "--quiet"])
+    header = out.read_text().splitlines()[0].split("\t")
+    assert "jaccard_sd" in header
+
+
+def test_stdev_is_absent_by_default(tmp_path):
+    """It costs another output-width array, so it must be opt-in."""
+    p, _ = _db(tmp_path, "a", n=3)
+    out = tmp_path / "o.tsv"
+    main(["query", "-q", p, "-o", str(out), "--quiet"])
+    assert "jaccard_sd" not in out.read_text().splitlines()[0]
 
 
 def test_retired_flags_are_reported(tmp_path, capsys):

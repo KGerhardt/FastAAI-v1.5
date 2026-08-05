@@ -311,14 +311,16 @@ impl Database {
     ///
     /// Threads are never defaulted to every logical core: scaling is memory-bound
     /// and measured *negative* past ~16 on consumer hardware.
-    #[pyo3(signature = (target, block = 128, threads = 1))]
+    #[pyo3(signature = (target, block = 128, threads = 1, stdev = false))]
     fn search<'py>(
         &self,
         py: Python<'py>,
         target: &Database,
         block: usize,
         threads: usize,
-    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize, usize)> {
+        stdev: bool,
+    ) -> PyResult<(Bound<'py, PyBytes>, Bound<'py, PyBytes>, usize, usize,
+                   Option<Bound<'py, PyBytes>>)> {
         if self.partitions.is_empty() || target.partitions.is_empty() {
             return Err(PyRuntimeError::new_err("both databases must be sealed"));
         }
@@ -337,6 +339,8 @@ impl Database {
         let (toffs, nt) = kernel::partition_offsets(&target.partitions);
         let mut jac = vec![0.0f64; nq * nt];
         let mut sh = vec![0u32; nq * nt];
+        // Only allocated when asked: at 2,943 genomes this is another 69 MB.
+        let mut sq = if stdev { vec![0.0f64; nq * nt] } else { Vec::new() };
 
         py.detach(|| {
             for (qi, qp) in self.partitions.iter().enumerate() {
@@ -345,15 +349,22 @@ impl Database {
                         continue; // mirrored from the (ti, qi) block below
                     }
                     let sym = selfcmp && ti == qi;
-                    let mut j = vec![0.0f64; qp.n_genomes * tp.n_genomes];
-                    let mut s = vec![0u32; qp.n_genomes * tp.n_genomes];
-                    kernel::join_threaded(qp, tp, block, threads, sym, &mut j, &mut s);
+                    let cells = qp.n_genomes * tp.n_genomes;
+                    let mut j = vec![0.0f64; cells];
+                    let mut s = vec![0u32; cells];
+                    let mut q = if stdev { vec![0.0f64; cells] } else { Vec::new() };
+                    kernel::join_threaded(
+                        qp, tp, block, threads, sym, &mut j, &mut s,
+                        if stdev { Some(&mut q) } else { None },
+                    );
                     for r in 0..qp.n_genomes {
                         let dst = (qoffs[qi] + r) * nt + toffs[ti];
-                        jac[dst..dst + tp.n_genomes]
-                            .copy_from_slice(&j[r * tp.n_genomes..(r + 1) * tp.n_genomes]);
-                        sh[dst..dst + tp.n_genomes]
-                            .copy_from_slice(&s[r * tp.n_genomes..(r + 1) * tp.n_genomes]);
+                        let src = r * tp.n_genomes..(r + 1) * tp.n_genomes;
+                        jac[dst..dst + tp.n_genomes].copy_from_slice(&j[src.clone()]);
+                        sh[dst..dst + tp.n_genomes].copy_from_slice(&s[src.clone()]);
+                        if stdev {
+                            sq[dst..dst + tp.n_genomes].copy_from_slice(&q[src]);
+                        }
                     }
                 }
             }
@@ -364,6 +375,9 @@ impl Database {
                     for t in (i + 1)..nt {
                         jac[t * nt + i] = jac[i * nt + t];
                         sh[t * nt + i] = sh[i * nt + t];
+                        if stdev {
+                            sq[t * nt + i] = sq[i * nt + t];
+                        }
                     }
                 }
                 let mut g = 0usize;
@@ -372,8 +386,17 @@ impl Database {
                         let k = p.accs.iter().filter(|a| a.present[local]).count() as u32;
                         jac[g * nt + g] = k as f64;
                         sh[g * nt + g] = k;
+                        if stdev {
+                            sq[g * nt + g] = k as f64; // every accession Jaccard 1.0
+                        }
                         g += 1;
                     }
+                }
+            }
+            // Standard deviation first: it needs the unreduced sum.
+            if stdev {
+                for i in 0..jac.len() {
+                    sq[i] = kernel::stdev_from(jac[i], sq[i], sh[i]);
                 }
             }
             for i in 0..jac.len() {
@@ -387,7 +410,14 @@ impl Database {
         let sb = PyBytes::new(py, unsafe {
             std::slice::from_raw_parts(sh.as_ptr() as *const u8, sh.len() * 4)
         });
-        Ok((jb, sb, nq, nt))
+        let qb = if stdev {
+            Some(PyBytes::new(py, unsafe {
+                std::slice::from_raw_parts(sq.as_ptr() as *const u8, sq.len() * 8)
+            }))
+        } else {
+            None
+        };
+        Ok((jb, sb, nq, nt, qb))
     }
 }
 

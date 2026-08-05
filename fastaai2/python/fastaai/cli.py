@@ -107,6 +107,7 @@ def _load_or_build(source, models, args, log) -> "_core.Database":
 
 
 def _write(res, out_path, style, emit):
+    has_sd = res.stdev is not None
     fh = open(out_path, "w") if out_path else sys.stdout
     try:
         if style == "matrix":
@@ -121,6 +122,8 @@ def _write(res, out_path, style, emit):
         cols = ["query", "target", "shared_scps"]
         if emit in ("jaccard", "both"):
             cols.append("jaccard")
+        if has_sd:
+            cols.append("jaccard_sd")
         if emit in ("aai", "both"):
             cols.append("aai")
         fh.write("\t".join(cols) + "\n")
@@ -130,6 +133,9 @@ def _write(res, out_path, style, emit):
                 if emit in ("jaccard", "both"):
                     v = res.jaccard[i, j]
                     row.append("NA" if np.isnan(v) else f"{v:.10g}")
+                if has_sd:
+                    v = res.stdev[i, j]
+                    row.append("NA" if np.isnan(v) else f"{v:.6g}")
                 if emit in ("aai", "both"):
                     v = aai[i, j]
                     row.append("NA" if np.isnan(v) else f"{v:.4f}")
@@ -158,7 +164,9 @@ def _common(p):
     p.add_argument("--quiet", action="store_true")
     for flag in RETIRED:
         p.add_argument(f"--{flag}", action="store_true", help=argparse.SUPPRESS)
-    p.add_argument("--do_stdev", action="store_true", help=argparse.SUPPRESS)
+    p.add_argument("--do_stdev", action="store_true",
+                   help="also report the standard deviation of Jaccard across shared "
+                        "SCPs; costs one more output-width array, so off by default")
     p.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
 
 
@@ -219,7 +227,7 @@ def cmd_query(args) -> int:
     tdb = qdb if same else _load_or_build(args.target, models, args, log)
 
     t0 = time.perf_counter()
-    res = search(qdb, tdb, threads=args.threads)
+    res = search(qdb, tdb, threads=args.threads, stdev=args.do_stdev)
     dt = time.perf_counter() - t0
     pairs = len(res.query_names) * len(res.target_names)
     log(f"search {dt:.2f}s ({pairs / max(dt, 1e-9):,.0f} pairs/s)"
@@ -320,11 +328,6 @@ def main(argv: list[str] | None = None) -> int:
     for flag, why in RETIRED.items():
         if getattr(args, flag, False) and not quiet:
             print(f"note: --{flag} no longer applies — {why}", file=sys.stderr)
-    if getattr(args, "do_stdev", False):
-        print("warning: --do_stdev is NOT implemented. FastAAI 1 reported the standard "
-              "deviation of Jaccard across shared SCPs; that column will be absent "
-              "rather than zero.", file=sys.stderr)
-
     return {"build": cmd_build, "query": cmd_query, "merge": cmd_merge}[args.command](args)
 
 

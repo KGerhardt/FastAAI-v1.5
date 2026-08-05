@@ -193,6 +193,11 @@ class SearchResult:
     target_names: list[str]
     jaccard: np.ndarray  # (nq, nt) float64, NaN where nothing is shared
     shared: np.ndarray  # (nq, nt) uint32
+    #: Standard deviation of Jaccard across shared accessions, or None when not
+    #: requested. Spread matters independently of the mean: a pair at AAI 65%
+    #: with tight agreement across markers is a different claim from the same
+    #: mean carried by two markers at 0.9 and the rest near 0.02.
+    stdev: np.ndarray | None = None
 
     @property
     def aai(self) -> np.ndarray:
@@ -217,10 +222,17 @@ def search(
     target: "_core.Database",
     threads: int = DEFAULT_SEARCH_THREADS,
     block: int = DEFAULT_BLOCK,
+    stdev: bool = False,
 ) -> SearchResult:
     """Search via the k-mer join. Passing the same database twice takes the
-    symmetric upper-triangle path automatically."""
-    jb, sb, nq, nt = query.search(target, block, threads)
+    symmetric upper-triangle path automatically.
+
+    *stdev* adds the spread of Jaccard across shared accessions. It costs one
+    more output-width array — another 69 MB at 2,943 genomes — so it is off by
+    default rather than always paid for.
+    """
+    jb, sb, nq, nt, qb = query.search(target, block, threads, stdev)
     jac = np.frombuffer(jb, dtype=np.float64).reshape(nq, nt)
     sh = np.frombuffer(sb, dtype=np.uint32).reshape(nq, nt)
-    return SearchResult(query.genome_names, target.genome_names, jac, sh)
+    sd = np.frombuffer(qb, dtype=np.float64).reshape(nq, nt) if qb is not None else None
+    return SearchResult(query.genome_names, target.genome_names, jac, sh, sd)

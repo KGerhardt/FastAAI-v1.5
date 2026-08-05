@@ -52,7 +52,7 @@ pub fn join_into(
     jaccard: &mut [f64],
     shared: &mut [u32],
 ) {
-    join_range_into(qp, tp, 0, qp.n_genomes, block, false, jaccard, shared)
+    join_range_into(qp, tp, 0, qp.n_genomes, block, false, jaccard, shared, None)
 }
 
 /// `join_into` restricted to query genomes `[qstart, qend)`.
@@ -74,6 +74,7 @@ pub fn join_range_into(
     symmetric: bool,
     jaccard: &mut [f64],
     shared: &mut [u32],
+    mut sumsq: Option<&mut [f64]>,
 ) {
     let nt = tp.n_genomes;
     let nq = qend - qstart;
@@ -87,6 +88,10 @@ pub fn join_range_into(
     let block = block.max(1).min(nq);
     jaccard.fill(0.0);
     shared.fill(0);
+    if let Some(sq) = sumsq.as_deref_mut() {
+        assert_eq!(sq.len(), nq * nt);
+        sq.fill(0.0);
+    }
 
     // Slot pairs for k-mers both sides carry, and a forward cursor per pair.
     // Sized by the intersection rather than by `kspace`, which is the second
@@ -174,14 +179,33 @@ pub fn join_range_into(
                 let src = qi * nt;
                 let dst = (qlo + qi - qstart) * nt;
                 let tlo = if symmetric { qlo + qi + 1 } else { 0 };
-                for t in tlo..nt {
-                    let i = cnt[src + t];
-                    let denom = ta.kmer_counts[t] + qn - i;
-                    if denom > 0 {
-                        jaccard[dst + t] += i as f64 / denom as f64;
+                // Two loop bodies rather than a per-element branch. A target
+                // lacking this accession yields j = 0, contributing nothing to
+                // either sum, and `shared` is not incremented — so the mean and
+                // variance are over shared accessions without a mask.
+                if let Some(sq) = sumsq.as_deref_mut() {
+                    for t in tlo..nt {
+                        let i = cnt[src + t];
+                        let denom = ta.kmer_counts[t] + qn - i;
+                        if denom > 0 {
+                            let j = i as f64 / denom as f64;
+                            jaccard[dst + t] += j;
+                            sq[dst + t] += j * j;
+                        }
+                        if ta.present[t] {
+                            shared[dst + t] += 1;
+                        }
                     }
-                    if ta.present[t] {
-                        shared[dst + t] += 1;
+                } else {
+                    for t in tlo..nt {
+                        let i = cnt[src + t];
+                        let denom = ta.kmer_counts[t] + qn - i;
+                        if denom > 0 {
+                            jaccard[dst + t] += i as f64 / denom as f64;
+                        }
+                        if ta.present[t] {
+                            shared[dst + t] += 1;
+                        }
                     }
                 }
             }
@@ -211,6 +235,7 @@ pub fn join_threaded(
     symmetric: bool,
     jaccard: &mut [f64],
     shared: &mut [u32],
+    sumsq: Option<&mut [f64]>,
 ) {
     let (nq, nt) = (qp.n_genomes, tp.n_genomes);
     let threads = threads.max(1).min(nq.max(1));
@@ -218,16 +243,47 @@ pub fn join_threaded(
 
     let jchunks: Vec<&mut [f64]> = jaccard.chunks_mut(per * nt).collect();
     let schunks: Vec<&mut [u32]> = shared.chunks_mut(per * nt).collect();
+    // Chunked the same way so each worker owns disjoint rows of every output.
+    let mut qchunks: Vec<Option<&mut [f64]>> = match sumsq {
+        Some(sq) => sq.chunks_mut(per * nt).map(Some).collect(),
+        None => (0..jchunks.len()).map(|_| None).collect(),
+    };
+    while qchunks.len() < jchunks.len() {
+        qchunks.push(None);
+    }
 
     std::thread::scope(|sc| {
-        for (i, (jc, scn)) in jchunks.into_iter().zip(schunks).enumerate() {
+        for (i, ((jc, scn), qc)) in jchunks.into_iter().zip(schunks).zip(qchunks).enumerate() {
             let (qs, qe) = (i * per, ((i + 1) * per).min(nq));
             if qs >= qe {
                 continue;
             }
-            sc.spawn(move || join_range_into(qp, tp, qs, qe, block, symmetric, jc, scn));
+            sc.spawn(move || {
+                join_range_into(qp, tp, qs, qe, block, symmetric, jc, scn, qc)
+            });
         }
     });
+}
+
+/// Standard deviation of Jaccard across shared accessions, from the running sum
+/// and sum of squares.
+///
+/// `sqrt(E[j^2] - (E[j])^2)`. The usual objection to this form is catastrophic
+/// cancellation, which does not bite with Jaccard bounded to [0, 1]: real values
+/// run ~0.09 with spread ~0.005, costing about 2.5 significant digits of f64's
+/// 16. Welford would avoid it at the price of a division per element, in a fold
+/// that is ~10% of runtime.
+///
+/// **The variance is clamped at zero** — near-identical per-accession Jaccards
+/// round negative, and `sqrt` of that is NaN.
+#[inline]
+pub fn stdev_from(sum: f64, sumsq: f64, shared: u32) -> f64 {
+    if shared == 0 {
+        return f64::NAN;
+    }
+    let n = shared as f64;
+    let mean = sum / n;
+    (sumsq / n - mean * mean).max(0.0).sqrt()
 }
 
 #[cfg(test)]
@@ -343,7 +399,7 @@ mod tests {
         for threads in [1usize, 2, 4, 8] {
             let mut j = vec![0.0; n * n];
             let mut s = vec![0u32; n * n];
-            join_threaded(&p, &p, 2, threads, false, &mut j, &mut s);
+            join_threaded(&p, &p, 2, threads, false, &mut j, &mut s, None);
             assert_eq!(s, sb, "threads={threads}");
             for i in 0..j.len() {
                 assert!((j[i] - jb[i]).abs() < 1e-12, "threads={threads} cell {i}");
@@ -411,7 +467,7 @@ mod tests {
         join_into(&p, &p, 3, &mut jf, &mut sf);
         let mut ju = vec![0.0; n * n];
         let mut su = vec![0u32; n * n];
-        join_range_into(&p, &p, 0, n, 3, true, &mut ju, &mut su);
+        join_range_into(&p, &p, 0, n, 3, true, &mut ju, &mut su, None);
         for i in 0..n {
             for t in 0..n {
                 if t > i {

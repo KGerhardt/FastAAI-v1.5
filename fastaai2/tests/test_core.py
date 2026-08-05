@@ -323,3 +323,71 @@ def test_forward_sets_are_not_stored(tmp_path):
     assert parts >= db.index_bytes()
     assert parts < db.index_bytes() * 1.5, \
         "stored size must track the inverted index, not the forward sets"
+
+
+# --------------------------------------------------- Jaccard standard deviation
+
+def test_stdev_matches_a_direct_computation():
+    """Sum-of-squares must agree with computing the per-accession values and
+    taking their spread directly — the thing v1 did by materialising them."""
+    genomes = {
+        "g0": [(0, b"MKVLAATTGGHHWWYY"), (1, b"PQRSTVWYACDEFGHI"), (2, b"CCCCDDDDEEEEFFFF")],
+        "g1": [(0, b"MKVLAATTGGHHWWYA"), (1, b"MMMMMMMMMMMMMMMM"), (2, b"CCCCDDDDEEEEFFFA")],
+        "g2": [(0, b"WWWWWWWWWWWWWWWW"), (1, b"PQRSTVWYACDEFGHA")],
+    }
+    db = fastaai.Database(["a0", "a1", "a2"])
+    for name, scps in genomes.items():
+        db.add_genome(name, scps)
+    db.seal()
+    res = fastaai.search(db, db, threads=1, stdev=True)
+    assert res.stdev is not None
+
+    names = db.genome_names
+    for i, qn in enumerate(names):
+        for j, tn in enumerate(names):
+            per_acc = []
+            for acc in range(3):
+                q = dict(genomes[qn]).get(acc)
+                t = dict(genomes[tn]).get(acc)
+                if q is None or t is None:
+                    continue
+                qk = set(fastaai.kmerize(q))
+                tk = set(fastaai.kmerize(t))
+                inter = len(qk & tk)
+                per_acc.append(inter / (len(qk) + len(tk) - inter))
+            if not per_acc:
+                assert math.isnan(res.stdev[i, j])
+                continue
+            want = float(np.std(per_acc))  # population sd, matching E[x^2]-E[x]^2
+            assert abs(res.stdev[i, j] - want) < 1e-9, f"{qn} vs {tn}"
+
+
+def test_stdev_is_zero_when_every_accession_agrees():
+    """Identical genomes give Jaccard 1.0 on every marker: no spread, and the
+    clamp must keep it at exactly 0 rather than a negative-rounded NaN."""
+    db = fastaai.Database(["a0", "a1"])
+    db.add_genome("g", [(0, b"MKVLAATTGGHH"), (1, b"PQRSTVWYACDE")])
+    db.add_genome("h", [(0, b"MKVLAATTGGHH"), (1, b"PQRSTVWYACDE")])
+    db.seal()
+    res = fastaai.search(db, db, threads=1, stdev=True)
+    assert (res.stdev >= 0).all(), "variance must be clamped, never negative"
+    assert np.allclose(res.stdev, 0.0)
+
+
+def test_stdev_absent_unless_requested():
+    db = fastaai.Database(["a0"])
+    db.add_genome("g", [(0, b"MKVLAATTGGHH")])
+    db.seal()
+    assert fastaai.search(db, db, threads=1).stdev is None
+
+
+def test_stdev_does_not_change_jaccard():
+    db = fastaai.Database(["a0", "a1"])
+    for i in range(6):
+        db.add_genome(f"g{i}", [(0, ("MKVLAATTGGHH" + "A" * i).encode()),
+                                (1, ("PQRSTVWYACDE" + "C" * i).encode())])
+    db.seal()
+    a = fastaai.search(db, db, threads=1)
+    b = fastaai.search(db, db, threads=1, stdev=True)
+    assert np.allclose(a.jaccard, b.jaccard, equal_nan=True)
+    assert (a.shared == b.shared).all()
