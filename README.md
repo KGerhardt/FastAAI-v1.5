@@ -110,6 +110,40 @@ two sides each fit a single partition is the 1×1 case and lands in one file, so
 to receive the blocks. The full matrix is never held, which is what makes an
 all-vs-all at GTDB scale expressible — 200k × 200k species is 40 billion pairs.
 
+## Output format
+
+**The TSV is FastAAI 1's, unchanged** — same columns, same names, same order, so
+a parser written against v1 keeps working:
+
+```
+query  target  avg_jacc_sim  jacc_SD  num_shared_SCPs  poss_shared_SCPs  AAI_estimate
+```
+
+Every block file carries this header, so blocks concatenate into one valid v1
+table. Numbers are rendered as `str(numpy.round(v, dp))`, matching v1 digit for
+digit: Jaccard and its standard deviation to 4 decimal places, AAI to 2.
+
+| | |
+|---|---|
+| `jacc_SD` | always present; reads `N/A` unless `--do_stdev` was given |
+| `poss_shared_SCPs` | `min(query SCPs, target SCPs)` — a pair cannot share more markers than the poorer genome carries |
+| `AAI_estimate` | `<30%` / `>90%` outside the regression's sensitivity band |
+| a pair sharing no marker | `N/A` in every value column |
+
+`--emit` narrows the columns (`jaccard` drops `AAI_estimate`, `aai` drops
+`avg_jacc_sim`); the default emits the full v1 schema.
+
+**`--output_style matrix`** writes a Q×T grid of AAI — one row per query, one
+column per target, `query_genome` in the corner — with v1's `15.0` and `95.0`
+standing in for the two categorical labels, since a cell cannot hold a string. It
+needs the whole result in memory, so it is available only for searches of a
+single partition pair; anything larger is refused rather than silently truncated.
+
+Two deliberate departures from v1: a pair sharing no marker is `N/A` in the
+matrix where v1 writes `0`, which cannot be told from a real measurement of
+zero; and `poss_shared_SCPs` uses the `minimum` of v1's three bulk paths rather
+than the `max` of its one scalar path.
+
 **FastAAI 1 command lines still work.** `build_db`, `db_query`, `merge_db`,
 `aai_index`, `single_query`, `multi_query` and `simple_query` are rerouted to
 the new verbs, with arguments preserved where they still mean something and a

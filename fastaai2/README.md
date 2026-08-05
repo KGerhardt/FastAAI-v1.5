@@ -48,6 +48,25 @@ res.shared    # (n, n) uint32, accessions carried by both genomes
 res.aai       # (n, n) float64, uncensored
 ```
 
+## Output format
+
+FastAAI 1's TSV, unchanged — same columns, names and order, so a v1 parser keeps
+working:
+
+```
+query  target  avg_jacc_sim  jacc_SD  num_shared_SCPs  poss_shared_SCPs  AAI_estimate
+```
+
+Every block file repeats this header, so blocks concatenate into one valid v1
+table. Numbers use `str(numpy.round(v, dp))` to match v1 digit for digit —
+Jaccard and its SD at 4 dp, AAI at 2. `jacc_SD` is always present and reads
+`N/A` without `--do_stdev`. `poss_shared_SCPs` is `min(query, target)` SCP
+counts. A pair sharing no marker is `N/A` throughout.
+
+`--output_style matrix` writes a Q×T grid of AAI with `query_genome` in the
+corner and v1's `15.0` / `95.0` sentinels for the categorical labels. It holds
+the whole result in memory, so it serves only single-partition-pair searches.
+
 ## Design notes that are easy to get wrong
 
 **The model set defines the accession list.** Accession IDs are positions in the
