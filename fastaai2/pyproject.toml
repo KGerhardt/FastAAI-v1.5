@@ -19,5 +19,8 @@ fastaai = "fastaai.cli:main"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+# The bundled model set. Without this the wheel ships no HMMs and `fastaai build`
+# cannot run without --hmm.
+include = [{ path = "python/fastaai/data/*", format = "wheel" }]
 module-name = "fastaai._core"
 python-source = "python"

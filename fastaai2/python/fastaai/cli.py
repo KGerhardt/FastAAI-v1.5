@@ -73,7 +73,10 @@ def _load_or_build(source, models, args, log) -> "_core.Database":
         return db
 
     if models is None:
-        raise SystemExit(f"{source} is not a database; --hmm is required to build one")
+        # No --hmm: fall back to the model set shipped with the package, so an
+        # install builds a database without hunting for models.
+        models = ModelSet()
+        log(f"  using the bundled model set ({len(models)} SCPs)")
     paths = find_genomes(p)
     if args.limit:
         paths = paths[: args.limit]
@@ -158,7 +161,9 @@ def write_blocks(query, target, out_path, threads, block, stdev, emit,
 
 
 def _common(p):
-    p.add_argument("--hmm", help="HMM file defining the SCP model set")
+    p.add_argument("--hmm",
+                   help="HMM file defining the SCP model set (default: the "
+                        "bundled 122-SCP set; plain or gzipped)")
     p.add_argument("--threads", type=int, default=DEFAULT_SEARCH_THREADS,
                    help=f"threads for the counting kernel (default {DEFAULT_SEARCH_THREADS})")
     p.add_argument("--preprocess-threads", type=int, default=4,
@@ -215,7 +220,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def cmd_build(args) -> int:
     log = _log(args.quiet)
-    models = ModelSet(args.hmm) if args.hmm else None
+    models = ModelSet(args.hmm) if args.hmm else None  # resolved on demand
     if models:
         log(f"{len(models)} models from {args.hmm}")
         if not models.has_trusted:
@@ -244,7 +249,7 @@ def cmd_query(args) -> int:
                              "--output_style matrix, which writes AAI only. "
                              "Use --output_style tsv.")
 
-    models = ModelSet(args.hmm) if args.hmm else None
+    models = ModelSet(args.hmm) if args.hmm else None  # resolved on demand
     qdb = _load_or_build(args.query, models, args, log)
     same = not args.target or args.target == args.query
     tdb = qdb if same else _load_or_build(args.target, models, args, log)

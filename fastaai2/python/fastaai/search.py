@@ -8,6 +8,7 @@ pyhmmer releases the GIL during search, so this is threaded rather than forked.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import os
 from dataclasses import dataclass
@@ -61,6 +62,37 @@ class Hit:
 HMM_READ_BUFFER = 1 << 20
 
 
+#: The model set shipped with the package — FastAAI 1's 122 SCPs, gzipped.
+#:
+#: A default, not a compiled-in set. It exists so an install works without
+#: hunting for models and so databases built with defaults share one fingerprint,
+#: but `--hmm` overrides it and everything downstream follows whichever file is
+#: used. A v2 keyed to GTDB swaps this and gets a different fingerprint, so the
+#: two generations refuse to be compared rather than mixing quietly.
+BUNDLED_HMM = "Complete_SCG_DB.hmm.gz"
+
+
+def bundled_hmm_path() -> str:
+    """Filesystem path to the packaged model set."""
+    from importlib import resources
+
+    return str(resources.files(__package__) / "data" / BUNDLED_HMM)
+
+
+def _open_hmm(path: str):
+    """Open an HMM file, transparently decompressing a gzipped one.
+
+    Detected by magic bytes rather than by suffix, so a user's own gzipped
+    models work too. The bundled set ships compressed: 9.2 MB against 2.0 MB,
+    and pyhmmer reads the stream without an intermediate file.
+    """
+    fh = open(path, "rb", buffering=HMM_READ_BUFFER)
+    if fh.peek(2)[:2] == b"\x1f\x8b":
+        fh.close()
+        return gzip.open(path, "rb")
+    return fh
+
+
 def _load_hmms(path: str) -> list:
     """Parse an HMM file by handing pyhmmer an open file object.
 
@@ -79,7 +111,7 @@ def _load_hmms(path: str) -> list:
     holds constant memory regardless of model-database size, which matters for
     Pfam-scale files and removes any need for a fallback path.
     """
-    with open(path, "rb", buffering=HMM_READ_BUFFER) as inf:
+    with _open_hmm(path) as inf:
         with pyhmmer.plan7.HMMFile(inf) as fh:
             return list(fh)
 
@@ -87,8 +119,9 @@ def _load_hmms(path: str) -> list:
 class ModelSet:
     """HMMs plus the accession ordering they induce."""
 
-    def __init__(self, path: os.PathLike | str):
-        self.path = os.fspath(path)
+    def __init__(self, path: os.PathLike | str | None = None):
+        #: None selects the bundled set, so callers need not know where it lives.
+        self.path = os.fspath(path) if path is not None else bundled_hmm_path()
         self.alphabet = pyhmmer.easel.Alphabet.amino()
         self.hmms = _load_hmms(self.path)
         if not self.hmms:

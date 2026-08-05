@@ -297,3 +297,25 @@ def test_unsupported_v1_flags_are_reported(flag):
 def test_hmm_table_flags_are_all_refused(flag):
     with pytest.raises(SystemExit, match="HMMER tables"):
         _reroute(["single_query", flag, "/tbl", "-o", "/o"])
+
+
+#: A real SecE/SEC61 protein (PF00584.20) from a Firmicutes genome, so the
+#: bundled models actually have something to hit.
+SCP_PROTEIN = "MFRFFKSIGQEMREVDWPNFKQLRKDSSTVISTSVFFIAFLALARLANSIVP*"
+
+
+def test_build_works_without_an_hmm_flag(tmp_path):
+    """A conda install has no HMM file lying around; the package ships one."""
+    from fastaai.search import ModelSet
+
+    prot = tmp_path / "in"
+    prot.mkdir()
+    (prot / "g.faa").write_text(f">p1\n{SCP_PROTEIN}\n")
+
+    db_path = tmp_path / "db"
+    main(["build", str(prot), "-d", str(db_path), "--input", "protein", "--quiet"])
+
+    db = fastaai.open_database(str(db_path))
+    assert len(db.accession_names) == 122, "the bundled set defines the accessions"
+    assert db.models == ModelSet().fingerprint, "records which models built it"
+    assert db.n_genomes == 1

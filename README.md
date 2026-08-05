@@ -96,13 +96,22 @@ maturin develop --release      # or: pip install .
 ## Use
 
 ```sh
-# build a database
-fastaai build /path/to/genomes --hmm models.hmm -d db/ --archive arch/
+# build a database — uses the bundled 122-SCP set
+fastaai build /path/to/genomes -d db/ --archive arch/
 
 # query it — against itself, or against another database
 fastaai query -q db/ -o aai.tsv
-fastaai query -q queries/ -t db/ --hmm models.hmm -o aai.tsv
+fastaai query -q queries/ -t db/ -o aai.tsv
+
+# any other SCP set works; --hmm overrides the default
+fastaai build /path/to/genomes --hmm gtdb_bac120.hmm -d gtdb_db/
 ```
+
+**The 122 SCPs FastAAI 1 shipped are bundled and used by default**, so an install
+works without hunting for models. They are a default, not a fixture: `--hmm` takes
+any HMM file, plain or gzipped, and the accession list, index and output all
+follow from it. Every database records which model set built it, so defaults and
+overrides cannot be mixed by accident.
 
 Results are written one block per query/target partition pair. A search whose
 two sides each fit a single partition is the 1×1 case and lands in one file, so

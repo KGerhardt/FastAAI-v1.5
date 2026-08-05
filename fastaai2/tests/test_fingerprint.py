@@ -172,3 +172,29 @@ def test_an_archive_without_a_fingerprint_reports_unknown(tmp_path, models):
     root = tmp_path / "arch"
     Archive(root, models.accessions).close()
     assert read_fingerprint(root) == ""
+
+
+# --- the bundled model set ----------------------------------------------------
+
+def test_the_bundled_set_is_the_v1_122():
+    from fastaai.search import bundled_hmm_path
+
+    assert Path(bundled_hmm_path()).exists()
+    ms = ModelSet()
+    assert len(ms) == 122
+    assert ms.has_trusted, "v1's models carry TC cutoffs"
+
+
+def test_the_bundled_copy_is_the_same_models_as_the_source(models):
+    """Gzipping must not change model identity."""
+    assert ModelSet().fingerprint == models.fingerprint
+
+
+def test_a_gzipped_model_file_is_read_transparently(tmp_path, models):
+    """Detected by magic bytes, so a user's own gzipped models work too."""
+    import gzip
+
+    p = tmp_path / "models.hmm.gz"
+    with gzip.open(p, "wb") as fh:
+        fh.write(HMMS.read_bytes())
+    assert ModelSet(str(p)).fingerprint == models.fingerprint
