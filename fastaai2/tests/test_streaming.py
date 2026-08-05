@@ -403,3 +403,34 @@ def test_a_self_block_of_a_multi_partition_search_has_its_own_diagonal(tmp_path,
     cross = tmp_path / "cross.matrix"
     db.write_block(db, last, 0, str(cross), 128, 1, False, "aai", "matrix")
     assert "100.0" not in cross.read_text()
+
+
+def test_the_tsv_reports_a_self_pair_as_identity(tmp_path):
+    """Same reasoning as the matrix diagonal, and the same answer.
+
+    This departs from FastAAI 1, which reports >90% here. The v1 schema is
+    matched in shape; the estimate for a pair that needs no estimating is not
+    something to reproduce.
+    """
+    p = _saved(tmp_path, "db", 6)
+    out = tmp_path / "o.tsv"
+    main(["query", "-q", p, "-o", str(out), "--quiet"])
+    rows = _rows([out])
+    for r in rows:
+        if r["query"] == r["target"]:
+            assert r["AAI_estimate"] == "100.0"
+            assert r["avg_jacc_sim"] == "1.0"
+
+
+def test_tsv_and_matrix_agree_on_the_diagonal(tmp_path):
+    p = _saved(tmp_path, "db", 5)
+    tsv, mat = tmp_path / "o.tsv", tmp_path / "o.matrix"
+    main(["query", "-q", p, "-o", str(tsv), "--quiet"])
+    main(["query", "-q", p, "-o", str(mat), "--output_style", "matrix", "--quiet"])
+
+    diag = {r["query"] for r in _rows([tsv])
+            if r["query"] == r["target"] and r["AAI_estimate"] == "100.0"}
+    lines = mat.read_text().splitlines()
+    names = lines[0].split("\t")[1:]
+    assert diag == {n for i, n in enumerate(names)
+                    if lines[1 + i].split("\t")[1 + i] == "100.0"}

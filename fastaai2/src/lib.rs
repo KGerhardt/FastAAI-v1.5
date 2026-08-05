@@ -905,7 +905,13 @@ impl Database {
                     }
                     if want_aai {
                         line.push('\t');
-                        report::aai_label(&mut line, aai::kaai_to_aai(j), s, j);
+                        if selfblock && r == c {
+                            // The genome against itself: identity is given, not
+                            // estimated, so the regression is not consulted.
+                            report::fmt_py_round(&mut line, report::SELF_IDENTITY, 2);
+                        } else {
+                            report::aai_label(&mut line, aai::kaai_to_aai(j), s, j);
+                        }
                     }
                     line.push('\n');
                     std::io::Write::write_all(&mut w, line.as_bytes())?;
