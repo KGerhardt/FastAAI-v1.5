@@ -131,6 +131,6 @@ meaningless output.
 
 Working end to end: on-disk partitioned databases, merge, archives, the
 FastAAI 1 compatible CLI, and optional per-pair Jaccard standard deviation
-(`--do_stdev`). 81 Python and 44 Rust tests.
+(`--do_stdev`). 87 Python and 44 Rust tests.
 
 Not yet packaged for bioconda.
