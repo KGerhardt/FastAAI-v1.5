@@ -197,26 +197,23 @@ def _write(res, out_path, style, emit):
 def _common(p):
     p.add_argument("--hmm", help="HMM file defining the SCP model set")
     p.add_argument("--threads", type=int, default=DEFAULT_SEARCH_THREADS,
-                   help=f"threads for the counting kernel (default {DEFAULT_SEARCH_THREADS}, "
-                        "a conservative starting point, not a ceiling — raise it to "
-                        "your core count on a compute node)")
+                   help=f"threads for the counting kernel (default {DEFAULT_SEARCH_THREADS})")
     p.add_argument("--preprocess-threads", type=int, default=4,
                    help="threads for gene prediction and HMM search (default 4)")
     p.add_argument("--filter", choices=("v1", "v1_alt", "rbh"), default=DEFAULT_FILTER,
-                   help="best-hit resolution; decides which protein each accession gets")
+                   help="best-hit resolution")
     p.add_argument("--input", dest="input_kind",
                    choices=("auto", "genome", "protein"), default="auto",
                    help="input type (default: guess from extension); protein input "
-                        "skips gene prediction, ~80%% of preprocessing")
+                        "skips gene prediction")
     p.add_argument("--archive", metavar="DIR",
-                   help="persist proteins and raw HMM hits so preprocessing need never repeat")
+                   help="persist proteins and raw HMM hits for later rebuilds")
     p.add_argument("--limit", type=int, help="use only the first N inputs")
     p.add_argument("--quiet", action="store_true")
     for flag in RETIRED:
         p.add_argument(f"--{flag}", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--do_stdev", action="store_true",
-                   help="also report the standard deviation of Jaccard across shared "
-                        "SCPs; costs one more output-width array, so off by default")
+                   help="also report the standard deviation of Jaccard across shared SCPs")
     p.add_argument("--verbose", action="store_true", help=argparse.SUPPRESS)
 
 
