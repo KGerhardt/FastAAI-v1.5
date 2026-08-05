@@ -728,7 +728,12 @@ impl Database {
             let (jac, sh, sq, nq, nt) =
                 self.block_values(target, qi, ti, block, threads, stdev)?;
 
-            let tmp = dest.with_extension("part");
+            // Temp name carries the pid. Two processes told to write the same
+            // block would otherwise open the same file, interleave their rows
+            // and rename the result into place — corruption that looks like a
+            // complete block. Renaming is atomic, so if both do finish, one
+            // simply replaces the other with identical bytes.
+            let tmp = dest.with_extension(format!("part.{}", std::process::id()));
             let file = std::fs::File::create(&tmp)?;
             let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
 

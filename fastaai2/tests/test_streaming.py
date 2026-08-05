@@ -163,7 +163,121 @@ def test_a_partial_block_never_looks_complete(tmp_path):
     db.save(p)
     blocks = tmp_path / "blocks"
     main(["query", "-q", p, "--blocks", str(blocks), "--quiet"])
-    assert list(blocks.glob("*.part")) == []
+    assert list(blocks.glob("*.part*")) == []
+
+
+def test_concurrent_writers_do_not_share_a_temp_file(tmp_path):
+    """Two processes may be told to write the same block.
+
+    With a shared temp name they would interleave rows into one file and rename
+    the mixture into place — corruption indistinguishable from a finished block.
+    """
+    import multiprocessing as mp
+
+    db = _db(40)
+    p = str(tmp_path / "db")
+    db.save(p)
+    blocks = tmp_path / "blocks"
+    blocks.mkdir()
+
+    def worker(_i):
+        main(["query", "-q", p, "--blocks", str(blocks), "--no-resume", "--quiet"])
+
+    ctx = mp.get_context("fork")
+    procs = [ctx.Process(target=worker, args=(i,)) for i in range(4)]
+    for pr in procs:
+        pr.start()
+    for pr in procs:
+        pr.join(60)
+    assert all(pr.exitcode == 0 for pr in procs)
+
+    # Whoever won, the file must be one complete block, not a mixture.
+    rows = list(csv.DictReader(open(blocks / block_name(0, 0)), delimiter="\t"))
+    assert len(rows) == 40 * 40
+    assert len({(r["query"], r["target"]) for r in rows}) == 40 * 40
+    assert list(blocks.glob("*.part*")) == []
+
+
+def test_blocks_across_two_distinct_databases(tmp_path):
+    qa, tb = str(tmp_path / "q"), str(tmp_path / "t")
+    _db(10).save(qa)
+    _db(12, start=500).save(tb)
+    blocks = tmp_path / "blocks"
+    main(["query", "-q", qa, "-t", tb, "--blocks", str(blocks), "--quiet"])
+    rows = [r for f in blocks.glob("*.tsv")
+            for r in csv.DictReader(open(f), delimiter="\t")]
+    assert len(rows) == 10 * 12
+
+
+@pytest.mark.parametrize("emit,cols", [
+    ("aai", ["query", "target", "shared_scps", "aai"]),
+    ("jaccard", ["query", "target", "shared_scps", "jaccard"]),
+])
+def test_blocks_honour_emit(tmp_path, emit, cols):
+    p = str(tmp_path / "db")
+    _db(6).save(p)
+    blocks = tmp_path / f"blocks_{emit}"
+    main(["query", "-q", p, "--blocks", str(blocks), "--emit", emit, "--quiet"])
+    got = sorted(blocks.glob("*.tsv"))[0]
+    assert open(got).readline().rstrip("\n").split("\t") == cols
+
+
+def test_block_stdev_matches_the_single_file_path(tmp_path):
+    p = str(tmp_path / "db")
+    _db(8).save(p)
+    single = tmp_path / "all.tsv"
+    main(["query", "-q", p, "-o", str(single), "--do_stdev", "--quiet"])
+    blocks = tmp_path / "blocks"
+    main(["query", "-q", p, "--blocks", str(blocks), "--do_stdev", "--quiet"])
+
+    def sd(paths):
+        return {(r["query"], r["target"]): r["jaccard_sd"]
+                for path in paths
+                for r in csv.DictReader(open(path), delimiter="\t")}
+
+    assert sd([single]) == sd(sorted(blocks.glob("*.tsv")))
+
+
+def test_saving_a_streamed_database_reproduces_it(tmp_path):
+    """The streamed path copies partition files rather than re-serialising."""
+    src = tmp_path / "src"
+    _db(30).save(str(src))
+    streamed = fastaai.open_database(str(src))
+    dest = tmp_path / "dest"
+    streamed.save(str(dest))
+
+    reopened = fastaai.open_database(str(dest))
+    assert reopened.n_genomes == 30
+    assert np.allclose(fastaai.search(reopened, reopened, threads=1).jaccard,
+                       fastaai.search(streamed, streamed, threads=1).jaccard,
+                       equal_nan=True)
+
+
+def test_saving_a_streamed_database_onto_itself_is_not_destructive(tmp_path):
+    p = tmp_path / "db"
+    _db(20).save(str(p))
+    db = fastaai.open_database(str(p))
+    db.save(str(p))
+    assert fastaai.open_database(str(p)).n_genomes == 20
+
+
+def test_merge_spans_partitions(tmp_path, multipart):
+    other = tmp_path / "other"
+    _db(100, start=99_000).save(str(other))
+    out = tmp_path / "merged"
+    written, _skipped, parts = fastaai.merge_databases(str(out), [multipart, str(other)])
+    assert written == 16_600
+    merged = fastaai.open_database(str(out))
+    assert merged.n_genomes == 16_600
+    assert merged.n_partitions == parts
+
+
+def test_a_block_outside_the_grid_is_refused(tmp_path):
+    p = str(tmp_path / "db")
+    _db(5).save(p)
+    db = fastaai.open_database(p)
+    with pytest.raises(ValueError):
+        db.search_block(db, 0, 99)
 
 
 @pytest.mark.parametrize("extra", [
