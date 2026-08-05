@@ -120,11 +120,25 @@ res.aai       # (n, n) float64, uncensored
 
 ## Things that are easy to get wrong
 
-**Jaccard is stored raw and AAI is uncensored.** FastAAI 1 wrote the strings
-`"<30%"` and `">90%"`. At the evolutionary distances this tool exists to serve,
-the interesting values sit near the bottom of the range, so censoring them
-discards exactly the signal being sought. The regression is unbounded above, so
-identical genomes report >100% — clamp at display time, not in storage.
+**`<30%` and `>90%` are results, not missing numbers.** The Jaccard→AAI
+regression has sensitivity only between them; outside that band the estimate
+cannot distinguish 27% from 19%, and printing either would assert a precision
+the method does not have. So the AAI column reports those two cases
+categorically, as v1 did. Matrix output, which cannot hold a string, carries
+v1's `15.0` and `95.0` sentinels.
+
+Zero Jaccard is labelled `<30%` — `log(0)` sends it to the top of the
+regression, so it must be caught before the ceiling test or two genomes with
+nothing in common report as `>90%`.
+
+**Jaccard is stored raw, and the labels are applied at output.** Storage keeps
+full precision so that a database can be re-reported, re-thresholded, or fed to
+a downstream model without having been rounded first; `res.jaccard` and
+`res.aai` in the Python API are raw floats for exactly that reason. The labels
+are what the *tool reports*, and there they are not optional.
+
+**Unshared pairs are `NA`, not `<30%`.** "These genomes share no marker" is the
+absence of a measurement, not a claim that their AAI is low.
 
 **Unshared pairs are NaN, not 0.** "These genomes share no marker" and "these
 genomes have AAI 0" are different statements.
@@ -140,9 +154,13 @@ meaningless output.
 The default `v1` reproduces v1 as actually executed. None is a superset of
 another, and the choice changes SCP sets and therefore AAI.
 
-**Thread counts are capped deliberately.** The counting kernel is memory-bound:
-6.17× at 16 threads on a 6P+8E laptop, and negative beyond — 20 threads was
-slower than 16. Nothing defaults to `available_parallelism()`.
+**`--threads` defaults to 8, which is a starting point and not a ceiling.** The
+only scaling numbers measured so far come from a 6P+8E laptop (6.17× at 16
+threads, worse beyond), and that machine cannot say anything useful about the
+question: past six threads it is scheduling onto efficiency cores, and past
+fourteen it is oversubscribed. Neither is a property of the kernel. On a compute
+node with real memory bandwidth, raise `--threads` to your core count — nothing
+in the code caps it, and the laptop ceiling should not be mistaken for one.
 
 ## Layout
 

@@ -7,6 +7,8 @@ Reproducible artifacts behind claims made in the top-level README.
 Does FastAAI 1.5 change the answers? 120 Firmicutes genomes, all-vs-all against
 FastAAI 1 driven through its own `aai_index` module, 14,400 pairs.
 
+![v1 vs v1.5 concordance](concordance_v1_v15.png)
+
     python plot_concordance.py [concordance_v1_v15.tsv] [out.png]
 
 | | |

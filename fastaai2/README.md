@@ -56,15 +56,24 @@ compared when accession list, `k` and alphabet all match; `Database.search`
 refuses otherwise, because mismatched model sets produce structurally valid,
 biologically meaningless output.
 
-**Jaccard is stored raw and AAI is uncensored.** FastAAI 1 wrote the strings
-`"<30%"` and `">90%"`. The usable band runs from J ≈ 0.006 (AAI 30%) to J ≈ 0.843
-(AAI 90%), so at the evolutionary distances this tool exists to serve the
-interesting values sit near the bottom of the range — censoring them discards
-exactly the signal being sought. The regression is also unbounded above, so
-identical genomes report >100%. Clamp at display time, not in storage.
+**`<30%` and `>90%` are results, not withheld numbers.** The usable band of the
+Jaccard→AAI regression runs from J ≈ 0.006 (AAI 30%) to J ≈ 0.843 (AAI 90%).
+Outside it the regression has no sensitivity left — it cannot separate 27% from
+19% — so reporting a figure there would claim a precision the estimator does not
+have. The AAI column emits the two categories as labels, as v1 did; matrix
+output cannot hold a string and carries v1's `15.0` / `95.0` sentinels instead.
+Zero Jaccard is labelled `<30%`, because `log(0)` otherwise lands it above the
+ceiling.
 
-**Unshared pairs are NaN, not 0.** "These genomes share no marker" and "these
-genomes have AAI 0" are different statements.
+**Storage is raw; the labels are applied at output.** The database keeps full
+precision so it can be re-reported or fed downstream without prior rounding, and
+`res.jaccard` / `res.aai` are raw floats. The regression is unbounded above, so
+identical genomes compute past 100% — that is a fact about the fitted curve, and
+it is exactly why the reported value is capped categorically at `>90%`.
+
+**Unshared pairs are NaN, not 0, and are reported `NA`.** "These genomes share
+no marker" and "these genomes have AAI 0" are different statements, and neither
+is `<30%`.
 
 **Best-hit resolution is a real choice** (`--filter`). Strict reciprocal best hit
 (`rbh`) is FastAAI's stated intent and is markedly harsher than either path
@@ -73,9 +82,14 @@ some non-reciprocal hits; `v1_alt` is the ordering from v1's uncalled second
 implementation. None is a superset of another — see `tests/test_filters.py` for
 the discriminating cases. The choice changes SCP sets and therefore AAI.
 
-**Thread counts are capped deliberately.** The counting kernel is memory-bound.
-Measured scaling on a 6P+8E laptop: 6.17× at 16 threads and *negative* beyond —
-20 threads was slower than 16. Nothing here defaults to `available_parallelism()`.
+**`--threads` defaults to 8 as a starting point, not a ceiling.** The only
+scaling measurement so far is from a 6P+8E laptop — 6.17× at 16 threads, worse
+beyond — and that machine is the wrong instrument for the question: past six
+threads it schedules onto efficiency cores and past fourteen it is
+oversubscribed. Neither result is a property of the kernel, and neither
+transfers to a compute node with real memory bandwidth. Raise `--threads` to the
+core count there; nothing in the code caps it. Proper scaling numbers on
+server hardware are still to be measured.
 
 ## Performance
 

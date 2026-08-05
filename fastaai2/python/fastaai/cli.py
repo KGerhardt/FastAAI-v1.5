@@ -106,15 +106,64 @@ def _load_or_build(source, models, args, log) -> "_core.Database":
     return db
 
 
+#: The band the Jaccard->AAI regression has sensitivity across. Outside it the
+#: estimate cannot support a specific figure, so the output says so categorically
+#: rather than printing a number that would assert precision it does not have.
+#: These are labels about the limits of the estimator, not display preferences,
+#: and they are not optional (v1 fastaai.py:2327-2338).
+AAI_FLOOR = 30.0
+AAI_CEILING = 90.0
+LABEL_BELOW = "<30%"
+LABEL_ABOVE = ">90%"
+
+#: A matrix cell cannot hold a string, so the two categories carry v1's sentinel
+#: values there instead (v1 README: "reports these categorical estimates with
+#: 15.0 and 95.0 AAI, respectively").
+MATRIX_BELOW = 15.0
+MATRIX_ABOVE = 95.0
+
+
+def aai_label(aai, shared, jaccard) -> str:
+    """Format one AAI estimate, categorically where the regression cannot resolve.
+
+    Zero Jaccard is the case that needs naming: `log(0)` sends it to the top of
+    the regression, so it must be caught before the ceiling test or two genomes
+    with nothing in common report as >90%. v1 carries the same correction.
+
+    No shared markers stays `NA`. "These genomes share no SCP" is not a claim
+    that their AAI is below 30% — it is the absence of a measurement.
+    """
+    if shared == 0 or (jaccard is not None and np.isnan(jaccard)):
+        return "NA"
+    if (jaccard is not None and jaccard == 0) or np.isnan(aai) or aai < AAI_FLOOR:
+        return LABEL_BELOW
+    if aai > AAI_CEILING:
+        return LABEL_ABOVE
+    return f"{aai:.2f}"
+
+
+def aai_matrix_value(aai, shared, jaccard) -> str:
+    """Matrix-format counterpart to `aai_label`, using v1's numeric sentinels."""
+    label = aai_label(aai, shared, jaccard)
+    if label == "NA":
+        return "NA"
+    if label == LABEL_BELOW:
+        return f"{MATRIX_BELOW:.1f}"
+    if label == LABEL_ABOVE:
+        return f"{MATRIX_ABOVE:.1f}"
+    return label
+
+
 def _write(res, out_path, style, emit):
     has_sd = res.stdev is not None
     fh = open(out_path, "w") if out_path else sys.stdout
     try:
         if style == "matrix":
-            aai = res.aai
+            aai, shared, jacc = res.aai, res.shared, res.jaccard
             fh.write("\t" + "\t".join(res.target_names) + "\n")
             for i, qn in enumerate(res.query_names):
-                row = ["NA" if np.isnan(v) else f"{v:.2f}" for v in aai[i]]
+                row = [aai_matrix_value(aai[i, j], shared[i, j], jacc[i, j])
+                       for j in range(len(res.target_names))]
                 fh.write(qn + "\t" + "\t".join(row) + "\n")
             return
 
@@ -137,8 +186,8 @@ def _write(res, out_path, style, emit):
                     v = res.stdev[i, j]
                     row.append("NA" if np.isnan(v) else f"{v:.6g}")
                 if emit in ("aai", "both"):
-                    v = aai[i, j]
-                    row.append("NA" if np.isnan(v) else f"{v:.4f}")
+                    row.append(aai_label(aai[i, j], res.shared[i, j],
+                                         res.jaccard[i, j]))
                 fh.write("\t".join(row) + "\n")
     finally:
         if out_path:
@@ -148,8 +197,9 @@ def _write(res, out_path, style, emit):
 def _common(p):
     p.add_argument("--hmm", help="HMM file defining the SCP model set")
     p.add_argument("--threads", type=int, default=DEFAULT_SEARCH_THREADS,
-                   help=f"threads for the counting kernel (default {DEFAULT_SEARCH_THREADS}); "
-                        "scaling is memory-bound and goes negative past ~16")
+                   help=f"threads for the counting kernel (default {DEFAULT_SEARCH_THREADS}, "
+                        "a conservative starting point, not a ceiling — raise it to "
+                        "your core count on a compute node)")
     p.add_argument("--preprocess-threads", type=int, default=4,
                    help="threads for gene prediction and HMM search (default 4)")
     p.add_argument("--filter", choices=("v1", "v1_alt", "rbh"), default=DEFAULT_FILTER,
