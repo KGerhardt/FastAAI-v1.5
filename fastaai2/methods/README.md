@@ -57,10 +57,17 @@ Prodigal and the same HMMER, and it still dominates a cold run.
 **Search**, 8 threads, wall clock less the ~0.22 s interpreter start both
 versions pay:
 
-| scale | pairs | v1 | v1.5 | v1.5 pairs/s | speedup |
+Throughput per thread, which is what compares across machines and thread counts.
+
+| scale | pairs | v1 | v1.5 | v1 /s/thread | v1.5 /s/thread |
 |---|---|---|---|---|---|
-| 120 genomes | 14,400 | 1.15 s | 0.016 s | 922,339 | 74x |
-| **2,943 genomes** | **8,661,249** | **21.84 s** | **1.587 s** | **5,457,298** | **14x** |
+| 120 genomes | 14,400 | 1.15 s | 0.016 s | 1,565 | 112,500 |
+| **2,943 genomes** | **8,661,249** | **21.84 s** | **1.587 s** | **49,572** | **682,203** |
+
+FastAAI 1's published in-memory figure is ~100k comparisons/s/thread and this
+machine measured it at 49,572, so the speedup is 13.8x against the measured v1
+and 6.8x against the published one. The lower figure is the one to quote until
+v1 is re-measured on hardware where it reaches its published throughput.
 
 **14x is the honest headline.** The two rows are not in tension: at 120
 genomes the pairwise work is trivial and v1's per-query `TEMP TABLE` +

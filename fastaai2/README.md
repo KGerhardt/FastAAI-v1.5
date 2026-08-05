@@ -100,7 +100,7 @@ alternatives behind each decision:
 |---|---|
 | counting kernel | ~0.53 ns per posting increment (~1.8 cycles) |
 | vs FastAAI 1's numpy kernel | **6.5× per core**, with SQLite already removed from v1's side |
-| real 2,943-genome index, 8 threads | **5.34M genome pairs/s** — 8.66M pairs in 1.6 s |
+| real 2,943-genome index, 8 threads | **682k genome pairs/s/thread** — 8.66M pairs in 1.6 s |
 
 The kernel is a k-mer join reading both sides as inverted indexes. On real data it
 is 1.50× the superseded per-query kernel, 1.85× with the symmetric upper-triangle

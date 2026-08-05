@@ -155,20 +155,6 @@ def aai_matrix_value(aai, shared, jaccard) -> str:
     return label
 
 
-def _labels(aai, shared, jac):
-    """Vectorised `aai_label` over whole arrays.
-
-    Precedence must match the scalar version exactly: no measurement (`NA`)
-    outranks the floor, and the floor outranks the ceiling so that zero Jaccard
-    — which `log(0)` places above the ceiling — comes out `<30%`.
-    """
-    out = np.char.mod("%.2f", np.nan_to_num(aai, nan=0.0))
-    out[aai > AAI_CEILING] = LABEL_ABOVE
-    out[(jac == 0) | np.isnan(aai) | (aai < AAI_FLOOR)] = LABEL_BELOW
-    out[(shared == 0) | np.isnan(jac)] = "NA"
-    return out
-
-
 def block_name(qi: int, ti: int) -> str:
     return f"block_q{qi:05d}_t{ti:05d}.tsv"
 
@@ -187,66 +173,26 @@ def write_blocks(query, target, out_dir, threads, block, stdev, emit, resume=Tru
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    qn, tn = query.genome_names, target.genome_names
-    qoff = np.cumsum([0] + list(query.partition_genomes))
-    toff = np.cumsum([0] + list(target.partition_genomes))
 
-    cols = ["query", "target", "shared_scps"]
-    if emit in ("jaccard", "both"):
-        cols.append("jaccard")
-    if stdev:
-        cols.append("jaccard_sd")
-    if emit in ("aai", "both"):
-        cols.append("aai")
-    header = "\t".join(cols) + "\n"
-
-    written = skipped = 0
+    written = skipped = rows = 0
     for qi in range(query.n_partitions):
         for ti in range(target.n_partitions):
             dest = out_dir / block_name(qi, ti)
             if resume and dest.exists():
                 skipped += 1
                 continue
-
-            jb, sb, r, c, qb = query.search_block(target, qi, ti, block, threads, stdev)
-            jac = np.frombuffer(jb, dtype=np.float64).reshape(r, c)
-            sh = np.frombuffer(sb, dtype=np.uint32).reshape(r, c)
-            sd = np.frombuffer(qb, dtype=np.float64).reshape(r, c) if qb is not None else None
-            aai = _aai_from_jaccard(jac) if emit in ("aai", "both") else None
-
-            tmp = dest.with_suffix(".tsv.part")
-            with open(tmp, "w") as fh:
-                fh.write(header)
-                for i in range(r):
-                    qname = qn[qoff[qi] + i]
-                    lab = _labels(aai[i], sh[i], jac[i]) if aai is not None else None
-                    for j in range(c):
-                        row = [qname, tn[toff[ti] + j], str(sh[i, j])]
-                        if emit in ("jaccard", "both"):
-                            v = jac[i, j]
-                            row.append("NA" if np.isnan(v) else f"{v:.10g}")
-                        if stdev:
-                            v = sd[i, j]
-                            row.append("NA" if np.isnan(v) else f"{v:.6g}")
-                        if lab is not None:
-                            row.append(lab[j])
-                        fh.write("\t".join(row) + "\n")
-            tmp.replace(dest)
+            # Rust computes and writes: a full self-block is 268M rows, which is
+            # not something to format one row at a time from Python.
+            n = query.write_block(target, qi, ti, str(dest), block, threads, stdev, emit)
+            rows += n
             written += 1
             if not quiet:
-                print(f"  {dest.name}  {r} x {c}", file=sys.stderr)
+                print(f"  {dest.name}  {n:,} rows", file=sys.stderr)
 
     if not quiet:
-        print(f"{written} block(s) written, {skipped} already present", file=sys.stderr)
+        print(f"{written} block(s) written ({rows:,} rows), {skipped} already present",
+              file=sys.stderr)
     return written, skipped
-
-
-def _aai_from_jaccard(jac):
-    out = np.full(jac.shape, np.nan)
-    ok = np.isfinite(jac) & (jac > 0)
-    x = np.power(-0.2607023 * np.log(jac[ok]), 1.0 / 3.435)
-    out[ok] = (1.810741 * np.exp(-x) - 0.3087057) * 100.0
-    return out
 
 
 def _write(res, out_path, style, emit):
@@ -401,7 +347,11 @@ def cmd_query(args) -> int:
     res = search(qdb, tdb, threads=args.threads, stdev=args.do_stdev)
     dt = time.perf_counter() - t0
     pairs = len(res.query_names) * len(res.target_names)
-    log(f"search {dt:.2f}s ({pairs / max(dt, 1e-9):,.0f} pairs/s)"
+    # Reported per thread, not aggregated across the job: throughput per thread
+    # is the figure that compares across machines and thread counts, and it is
+    # the convention FastAAI 1's published figures use.
+    per_thread = pairs / max(dt, 1e-9) / max(args.threads, 1)
+    log(f"search {dt:.2f}s ({per_thread:,.0f} pairs/s/thread, {args.threads} threads)"
         f"{' [symmetric, upper triangle]' if same else ''}")
 
     _write(res, args.output, args.output_style, args.emit)

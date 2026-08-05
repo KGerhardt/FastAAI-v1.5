@@ -14,6 +14,7 @@ pub mod index;
 pub mod kernel;
 pub mod kmer;
 pub mod pairwise;
+pub mod report;
 pub mod store;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -135,6 +136,73 @@ impl Database {
             acc = f(acc, &p);
         }
         Ok(acc)
+    }
+
+    /// Compute one `q x t` block, reduced to final values.
+    ///
+    /// Holds two partitions and one block-sized result — never the database and
+    /// never the full matrix. Shared by the buffer-returning and file-writing
+    /// entry points so the two cannot drift.
+    fn block_values(
+        &self,
+        target: &Database,
+        qi: usize,
+        ti: usize,
+        block: usize,
+        threads: usize,
+        stdev: bool,
+    ) -> std::io::Result<(Vec<f64>, Vec<u32>, Vec<f64>, usize, usize)> {
+        // Symmetric only when this is literally the same partition of the same
+        // database. Blocks (qi, ti) and (ti, qi) of a self-search are transposes,
+        // but each is written independently, so neither is skipped here.
+        let selfblock =
+            std::ptr::eq(self as *const Database, target as *const Database) && qi == ti;
+
+        let qp = self.part(qi)?;
+        let tp = if selfblock { None } else { Some(target.part(ti)?) };
+        let tpr: &Partition = match &tp {
+            Some(p) => p,
+            None => &qp,
+        };
+
+        let (nq, nt) = (qp.n_genomes, tpr.n_genomes);
+        let cells = nq * nt;
+        let mut jac = vec![0.0f64; cells];
+        let mut sh = vec![0u32; cells];
+        let mut sq = if stdev { vec![0.0f64; cells] } else { Vec::new() };
+
+        kernel::join_threaded(
+            &qp, tpr, block, threads, selfblock, &mut jac, &mut sh,
+            if stdev { Some(&mut sq) } else { None },
+        );
+        if selfblock {
+            for i in 0..nq {
+                for t in (i + 1)..nt {
+                    jac[t * nt + i] = jac[i * nt + t];
+                    sh[t * nt + i] = sh[i * nt + t];
+                    if stdev {
+                        sq[t * nt + i] = sq[i * nt + t];
+                    }
+                }
+            }
+            for local in 0..nq {
+                let k = qp.accs.iter().filter(|a| a.present[local]).count() as u32;
+                jac[local * nt + local] = k as f64;
+                sh[local * nt + local] = k;
+                if stdev {
+                    sq[local * nt + local] = k as f64;
+                }
+            }
+        }
+        if stdev {
+            for i in 0..cells {
+                sq[i] = kernel::stdev_from(jac[i], sq[i], sh[i]);
+            }
+        }
+        for i in 0..cells {
+            jac[i] = if sh[i] == 0 { f64::NAN } else { jac[i] / sh[i] as f64 };
+        }
+        Ok((jac, sh, sq, nq, nt))
     }
 }
 
@@ -580,58 +648,9 @@ impl Database {
             )));
         }
 
-        // Symmetric only when this is literally the same partition of the same
-        // database. Block (qi, ti) and (ti, qi) of a self-search are transposes,
-        // but each is written independently, so neither is skipped here.
-        let selfblock = std::ptr::eq(self as *const Database, target as *const Database)
-            && qi == ti;
-
-        let qp = self.part(qi).map_err(to_py)?;
-        let tp = if selfblock { None } else { Some(target.part(ti).map_err(to_py)?) };
-        let tpr: &Partition = match &tp {
-            Some(p) => p,
-            None => &qp,
-        };
-
-        let (nq, nt) = (qp.n_genomes, tpr.n_genomes);
-        let cells = nq * nt;
-        let mut jac = vec![0.0f64; cells];
-        let mut sh = vec![0u32; cells];
-        let mut sq = if stdev { vec![0.0f64; cells] } else { Vec::new() };
-
-        py.detach(|| {
-            kernel::join_threaded(
-                &qp, tpr, block, threads, selfblock, &mut jac, &mut sh,
-                if stdev { Some(&mut sq) } else { None },
-            );
-            if selfblock {
-                for i in 0..nq {
-                    for t in (i + 1)..nt {
-                        jac[t * nt + i] = jac[i * nt + t];
-                        sh[t * nt + i] = sh[i * nt + t];
-                        if stdev {
-                            sq[t * nt + i] = sq[i * nt + t];
-                        }
-                    }
-                }
-                for local in 0..nq {
-                    let k = qp.accs.iter().filter(|a| a.present[local]).count() as u32;
-                    jac[local * nt + local] = k as f64;
-                    sh[local * nt + local] = k;
-                    if stdev {
-                        sq[local * nt + local] = k as f64;
-                    }
-                }
-            }
-            if stdev {
-                for i in 0..cells {
-                    sq[i] = kernel::stdev_from(jac[i], sq[i], sh[i]);
-                }
-            }
-            for i in 0..cells {
-                jac[i] = if sh[i] == 0 { f64::NAN } else { jac[i] / sh[i] as f64 };
-            }
-        });
+        let (jac, sh, sq, nq, nt) = py
+            .detach(|| self.block_values(target, qi, ti, block, threads, stdev))
+            .map_err(to_py)?;
 
         let jb = PyBytes::new(py, unsafe {
             std::slice::from_raw_parts(jac.as_ptr() as *const u8, jac.len() * 8)
@@ -647,6 +666,129 @@ impl Database {
             None
         };
         Ok((jb, sb, nq, nt, qb))
+    }
+
+    /// Compute one block and write it as TSV, without it passing through Python.
+    ///
+    /// A full self-block is 16,384^2 = 268M rows. Formatting that a row at a
+    /// time from Python is not viable, so the worker that computes a block also
+    /// writes it.
+    ///
+    /// Written to a temporary name and renamed, so a file that exists is a file
+    /// that is complete — which is what lets a killed run resume and lets
+    /// separate processes take different blocks without coordinating.
+    ///
+    /// Returns the number of data rows written.
+    #[pyo3(signature = (target, qi, ti, path, block = 128, threads = 1,
+                        stdev = false, emit = "both"))]
+    #[allow(clippy::too_many_arguments)]
+    fn write_block(
+        &self,
+        py: Python<'_>,
+        target: &Database,
+        qi: usize,
+        ti: usize,
+        path: &str,
+        block: usize,
+        threads: usize,
+        stdev: bool,
+        emit: &str,
+    ) -> PyResult<usize> {
+        if !self.sealed() || !target.sealed() {
+            return Err(PyRuntimeError::new_err("both databases must be sealed"));
+        }
+        if self.schema_key() != target.schema_key() {
+            return Err(PyValueError::new_err(
+                "schema mismatch: query and target must share accession list, k and alphabet",
+            ));
+        }
+        if qi >= self.n_parts() || ti >= target.n_parts() {
+            return Err(PyValueError::new_err(format!(
+                "block ({qi}, {ti}) is outside {} x {} partitions",
+                self.n_parts(), target.n_parts()
+            )));
+        }
+        let (want_jac, want_aai) = match emit {
+            "both" => (true, true),
+            "jaccard" => (true, false),
+            "aai" => (false, true),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "emit must be one of aai, jaccard, both (got {other})"
+                )))
+            }
+        };
+
+        let (qoffs, _) = self.offsets();
+        let (toffs, _) = target.offsets();
+        let (qstart, tstart) = (qoffs[qi], toffs[ti]);
+        let dest = std::path::PathBuf::from(path);
+
+        let written = py.detach(|| -> std::io::Result<usize> {
+            let (jac, sh, sq, nq, nt) =
+                self.block_values(target, qi, ti, block, threads, stdev)?;
+
+            let tmp = dest.with_extension("part");
+            let file = std::fs::File::create(&tmp)?;
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
+
+            let mut head = String::from("query\ttarget\tshared_scps");
+            if want_jac {
+                head.push_str("\tjaccard");
+            }
+            if stdev {
+                head.push_str("\tjaccard_sd");
+            }
+            if want_aai {
+                head.push_str("\taai");
+            }
+            head.push('\n');
+            std::io::Write::write_all(&mut w, head.as_bytes())?;
+
+            // One reusable line buffer: 268M allocations per block is the thing
+            // this function exists to avoid.
+            let mut line = String::with_capacity(128);
+            for r in 0..nq {
+                let qname = &self.names[qstart + r];
+                for c in 0..nt {
+                    let idx = r * nt + c;
+                    let (j, s) = (jac[idx], sh[idx]);
+                    line.clear();
+                    line.push_str(qname);
+                    line.push('\t');
+                    line.push_str(&target.names[tstart + c]);
+                    line.push('\t');
+                    let _ = std::fmt::Write::write_fmt(&mut line, format_args!("{s}"));
+                    if want_jac {
+                        line.push('\t');
+                        if j.is_nan() {
+                            line.push_str("NA");
+                        } else {
+                            report::fmt_g(&mut line, j, 10);
+                        }
+                    }
+                    if stdev {
+                        line.push('\t');
+                        if sq[idx].is_nan() {
+                            line.push_str("NA");
+                        } else {
+                            report::fmt_g(&mut line, sq[idx], 6);
+                        }
+                    }
+                    if want_aai {
+                        line.push('\t');
+                        report::aai_label(&mut line, aai::kaai_to_aai(j), s, j);
+                    }
+                    line.push('\n');
+                    std::io::Write::write_all(&mut w, line.as_bytes())?;
+                }
+            }
+            std::io::Write::flush(&mut w)?;
+            drop(w);
+            std::fs::rename(&tmp, &dest)?;
+            Ok(nq * nt)
+        });
+        written.map_err(to_py)
     }
 }
 

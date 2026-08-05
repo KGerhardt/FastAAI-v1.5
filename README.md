@@ -22,15 +22,31 @@ Python's parallelism.
 versions pay. v1 was run through `db_query --in_memory --store_results`, its
 fastest path:
 
-| scale | pairs | v1 | v1.5 | v1.5 pairs/s | speedup |
-|---|---|---|---|---|---|
-| 120 genomes | 14,400 | 1.15 s | 0.016 s | 922,339 | 74× |
-| **2,943 genomes** | **8,661,249** | **21.84 s** | **1.587 s** | **5,457,298** | **14×** |
+Throughput is per thread, which is the figure that compares across machines and
+thread counts.
 
-**14× is the number that describes the engine.** The two rows are not in
-tension: at 120 genomes the pairwise work is trivial and v1's per-query
-`TEMP TABLE` + `INNER JOIN` overhead is most of the runtime, so 74× is really a
-measure of fixed cost. Both are reported rather than the flattering one.
+| scale | pairs | v1 | v1.5 | v1 /s/thread | v1.5 /s/thread |
+|---|---|---|---|---|---|
+| 120 genomes | 14,400 | 1.15 s | 0.016 s | 1,565 | 112,500 |
+| **2,943 genomes** | **8,661,249** | **21.84 s** | **1.587 s** | **49,572** | **682,203** |
+
+**The ratio depends on which v1 baseline is fair.** FastAAI 1's published
+in-memory figure is ~100k comparisons/s/thread; this machine measured v1 at
+49,572, about half that. So:
+
+| v1 baseline | speedup |
+|---|---|
+| v1 as measured here (49,572 /s/thread) | 13.8× |
+| **v1 as published (~100,000 /s/thread)** | **6.8×** |
+
+6.8× is the figure to quote until the v1 baseline is re-measured on hardware
+where it reaches its published throughput. This is a laptop — 6 performance
+cores plus 8 efficiency cores — and v1's thread scaling on it is not
+established.
+
+The 120-genome row is fixed cost rather than throughput: at that size v1's
+per-query `TEMP TABLE` and `INNER JOIN` dominate and neither version is doing
+enough work to measure.
 
 Memory and disk at 2,943 genomes:
 

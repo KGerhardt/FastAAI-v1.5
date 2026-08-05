@@ -1,16 +1,34 @@
 Search phase: FastAAI 1 vs 1.5, same genomes, same machine, 8 threads.
-Both figures are whole-process wall clock minus the ~0.22 s interpreter
-start that both versions pay identically.
+Wall clock less the ~0.22 s interpreter start both versions pay.
+v1 was run through `db_query --in_memory --store_results`, its fastest path.
 
-scale                   pairs         v1       v1.5   v1.5 pairs/s   speedup
-120 genomes            14,400      1.15s     0.016s        922,339       74x
-2,943 genomes       8,661,249     21.84s     1.587s      5,457,298       14x
+Throughput is reported per thread. Aggregate figures do not compare across
+machines or thread counts, and per-thread is the convention FastAAI 1's
+published numbers use.
 
-Both v1 figures were measured with `db_query --in_memory --store_results`,
-its fastest path. Peak RSS at 2,943 genomes: v1 1.01 GB, against a v1.5
-index of 116 MB. Database on disk at that scale: v1 508 MB, v1.5 116 MB.
+scale                 pairs        v1 s     v1.5 s   v1 /s/thr  v1.5 /s/thr
+120 genomes          14,400        1.15      0.016       1,565      112,500
+2,943 genomes     8,661,249       21.84      1.587      49,572      682,203
 
-The two speedups are not in tension. At 120 genomes the pairwise work is
-trivial and v1's per-query TEMP TABLE and INNER JOIN overhead is most of
-the runtime, so the ratio measures fixed cost. At 2,943 genomes the work
-dominates, and 14x is the figure that describes the engine.
+CAVEAT ON THE RATIO.  FastAAI 1's published in-memory figure is ~100k
+comparisons/s/thread. This machine measured v1 at 49,572 -- about half. The
+speedup therefore depends on which v1 number is taken as fair:
+
+    against v1 measured here (49,572/s/thr)   13.8x
+    against v1 as published  (~100,000/s/thr)  6.8x
+
+The lower figure is the one to quote unless the v1 baseline is re-measured on
+hardware where it reaches its published throughput. This is a laptop
+(6 performance + 8 efficiency cores); v1's thread scaling on it is not
+established, and past six threads the efficiency cores are in play.
+
+The 120-genome row is fixed cost, not throughput: at that size v1's per-query
+TEMP TABLE and INNER JOIN dominate, and neither version is doing enough work
+to measure.
+
+Memory and disk at 2,943 genomes:
+  peak RSS          v1 1.01 GB     v1.5 412 MB (search, incl. output matrices)
+  database on disk  v1 508 MB      v1.5 116 MB
+
+Since partitions stream from disk, opening a database no longer loads it:
+0.17 s and ~0 MB for the 2,943-genome database, against a full read before.
