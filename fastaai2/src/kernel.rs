@@ -75,7 +75,7 @@ pub fn join_range_into(
     jaccard: &mut [f64],
     shared: &mut [u32],
 ) {
-    let (nt, ks) = (tp.n_genomes, qp.kspace);
+    let nt = tp.n_genomes;
     let nq = qend - qstart;
     assert_eq!(qp.n_acc, tp.n_acc);
     assert_eq!(jaccard.len(), nq * nt);
@@ -88,19 +88,42 @@ pub fn join_range_into(
     jaccard.fill(0.0);
     shared.fill(0);
 
-    let mut cursors = vec![0u32; ks];
+    // Slot pairs for k-mers both sides carry, and a forward cursor per pair.
+    // Sized by the intersection rather than by `kspace`, which is the second
+    // payoff of sparse storage: at 15.8% occupancy the sweep is ~6x shorter and
+    // the cursor array shrinks with it.
+    let mut matches: Vec<(u32, u32)> = Vec::new();
+    let mut cursors: Vec<u32> = Vec::new();
     let mut cnt = vec![0u32; block * nt];
 
     for a in 0..qp.n_acc {
         let qa = &qp.accs[a];
         let ta = &tp.accs[a];
 
-        // Seed at the first local ID >= qstart; postings are sorted, so this is
-        // a partition point rather than a scan.
-        for k in 0..ks {
-            let (s, e) = (qa.offsets[k] as usize, qa.offsets[k + 1] as usize);
+        // Merge-join two sorted k-mer lists — no lookup, no binary search.
+        matches.clear();
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < qa.kmers.len() && j < ta.kmers.len() {
+            match qa.kmers[i].cmp(&ta.kmers[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    matches.push((i as u32, j as u32));
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+
+        // Seed each cursor at the first local ID >= qstart. Postings are sorted,
+        // so this is a partition point; it is also what lets disjoint query
+        // ranges run on separate threads without coordination.
+        cursors.clear();
+        cursors.reserve(matches.len());
+        for &(qi, _) in &matches {
+            let (s, e) = (qa.offsets[qi as usize] as usize, qa.offsets[qi as usize + 1] as usize);
             let skip = qa.postings[s..e].partition_point(|&g| (g as usize) < qstart);
-            cursors[k] = (s + skip) as u32;
+            cursors.push((s + skip) as u32);
         }
 
         let mut qlo = qstart;
@@ -109,14 +132,14 @@ pub fn join_range_into(
             let w = qhi - qlo;
             cnt[..w * nt].fill(0);
 
-            for k in 0..ks {
-                let stop = qa.offsets[k + 1];
-                let mut c = cursors[k];
+            for (m, &(qi, ti)) in matches.iter().enumerate() {
+                let stop = qa.offsets[qi as usize + 1];
+                let mut c = cursors[m];
                 if c >= stop {
                     continue;
                 }
-                let run_start = ta.offsets[k] as usize;
-                let ts = &ta.postings[run_start..ta.offsets[k + 1] as usize];
+                let run_start = ta.offsets[ti as usize] as usize;
+                let ts = &ta.postings[run_start..ta.offsets[ti as usize + 1] as usize];
                 while c < stop {
                     let qg = qa.postings[c as usize] as usize;
                     if qg >= qhi {
@@ -138,9 +161,11 @@ pub fn join_range_into(
                     }
                     c += 1;
                 }
-                cursors[k] = c;
+                cursors[m] = c;
             }
 
+            // Runs for every query genome in the block, including those with no
+            // matched k-mers — an accession both carry still counts as shared.
             for qi in 0..w {
                 let qn = qa.kmer_counts[qlo + qi];
                 if qn == 0 {
@@ -165,9 +190,15 @@ pub fn join_range_into(
     }
 }
 
-/// Cursor-array bytes one join worker holds — `kspace`, not `n_acc * kspace`.
-pub fn join_cursor_bytes(qp: &Partition) -> usize {
-    qp.kspace * 4
+/// Upper bound on cursor bytes one join worker holds: four per k-mer both sides
+/// could share, which is at most the smaller occupied set — not `kspace`.
+pub fn join_cursor_bytes(qp: &Partition, tp: &Partition) -> usize {
+    qp.accs
+        .iter()
+        .zip(&tp.accs)
+        .map(|(q, t)| q.occupied().min(t.occupied()) * 4)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Threaded k-mer join over one partition pair: disjoint query ranges, no shared
@@ -411,11 +442,14 @@ mod tests {
     }
 
     #[test]
-    fn cursor_array_is_kspace_sized_not_per_accession() {
+    fn cursor_array_is_bounded_by_occupancy_not_kspace() {
         // The point of the accession-outer loop: 0.64 MB per worker at
         // k=4/|A|=20, not the 78 MB an (accession, k-mer) cursor table would cost.
         let sets = fixture();
         let p = Partition::build(&sets, 2, 16).unwrap();
-        assert_eq!(join_cursor_bytes(&p), p.kspace * 4);
+        // Bounded by the occupied intersection, not the k-mer space.
+        assert!(join_cursor_bytes(&p, &p) <= p.kspace * 4);
+        assert_eq!(join_cursor_bytes(&p, &p),
+                   p.accs.iter().map(|a| a.occupied() * 4).max().unwrap());
     }
 }

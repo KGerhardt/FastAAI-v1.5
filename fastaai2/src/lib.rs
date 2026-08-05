@@ -181,6 +181,21 @@ impl Database {
         self.partitions.iter().map(|p| p.index_bytes()).sum()
     }
 
+    /// What a dense k-mer index would have cost, for comparison.
+    fn dense_index_bytes(&self) -> usize {
+        self.partitions.iter().map(|p| p.dense_index_bytes()).sum()
+    }
+
+    /// Fraction of the k-mer space occupied, averaged over accessions and
+    /// partitions. Below 0.5, sparse storage is the smaller layout.
+    fn occupancy(&self) -> f64 {
+        if self.partitions.is_empty() {
+            return 0.0;
+        }
+        self.partitions.iter().map(|p| p.occupancy()).sum::<f64>()
+            / self.partitions.len() as f64
+    }
+
     /// Resident bytes of the single largest partition — the figure that must fit
     /// a per-thread RAM budget when partitions are streamed one at a time.
     fn largest_partition_bytes(&self) -> usize {
