@@ -1,16 +1,7 @@
 """v1 vs v1.5 AAI concordance figure.
 
-Two panels, because one alone would mislead:
-
-  A  concordance — v1 against v1.5 on the identity line. At this agreement every
-     point sits on the line, which is the finding, but a reader cannot tell 1e-4
-     from 1e-2 by eye on a 40-60% axis.
-  B  residual — the deviation itself, at a scale where it is legible, against the
-     AAI band it occurs in.
-
-Panel A alone says "they agree." Panel B says by how much and whether the
-disagreement is structured. Publishing only A would be the more flattering and
-less honest figure.
+  A  concordance — v1 against v1.5, with the identity line for reference.
+  B  residual — v1.5 minus v1, at a scale where the deviation is legible.
 
 Plotted in AAI rather than Jaccard: they are a transform of one another, and AAI
 is the number people act on.
@@ -132,22 +123,17 @@ def main() -> int:
 
     mism = int((s1 != s15).sum())
     fig.suptitle(
-        f"FastAAI 1.5 reproduces FastAAI 1   ·   {len(a1):,} pairs   ·   "
+        f"FastAAI 1 vs FastAAI 1.5   ·   {len(a1):,} pairs   ·   "
         f"{mism} shared-SCP differences",
-        x=0.008, y=0.982, ha="left", color=INK, fontsize=12, fontweight="bold",
+        x=0.008, y=0.978, ha="left", color=INK, fontsize=12, fontweight="bold",
     )
     fig.text(
-        0.008, 0.012,
-        f"120 Firmicutes genomes, all-vs-all; {self_pairs} self-comparisons excluded "
-        "(Jaccard 1.0 in both, and the regression is unbounded above).\n"
-        "The residual is FastAAI 1 encoding stop (*) and ambiguous (X) codons as if they "
-        "were residues: its filtering k-merizer (unique_kmers, fastaai.py:1421) is dead "
-        "code whose\nlookup table is never built. v1.5 excludes both, so every deviation "
-        "is v1.5 correcting v1.",
+        0.008, 0.015,
+        f"120 Firmicutes genomes, all-vs-all; {self_pairs} self-comparisons excluded.",
         color=MUTED, fontsize=8.4, va="bottom",
     )
 
-    fig.subplots_adjust(left=0.075, right=0.985, top=0.85, bottom=0.235)
+    fig.subplots_adjust(left=0.075, right=0.985, top=0.855, bottom=0.175)
     fig.savefig(out, dpi=200, facecolor=SURFACE)
     print(f"wrote {out}")
     print(f"  pairs {len(a1):,} ({self_pairs} self-comparisons excluded)")

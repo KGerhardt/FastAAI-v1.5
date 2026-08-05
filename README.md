@@ -54,29 +54,23 @@ At 2,943 genomes that is roughly two CPU-hours of preprocessing against 1.6 s of
 search. The speedup above is what you get on a database you already built —
 which is the case FastAAI exists for. Build once, `--archive`, and query forever.
 
-## Does it change the answers?
+## Agreement with FastAAI 1
 
-No. 120 Firmicutes, all-vs-all, against FastAAI 1 driven through its own
-`aai_index` module — 14,280 off-diagonal pairs, **0 shared-SCP differences**,
-median |Δ AAI| 0.0115 percentage points.
+120 Firmicutes genomes, all-vs-all, against FastAAI 1 driven through its own
+`aai_index` module.
 
 ![v1 vs v1.5 concordance](fastaai2/methods/concordance_v1_v15.png)
 
-Panel A is the finding; panel B exists because at this level of agreement a
-reader cannot tell 1e-4 from 1e-2 by eye on a 40–100% axis, and publishing A
-alone would be the more flattering and less honest figure.
+| | |
+|---|---|
+| pairs compared (off-diagonal) | 14,280 |
+| shared-SCP differences | 0 |
+| median \|Δ AAI\| | 0.0115 percentage points |
+| max \|Δ AAI\| | 0.0627 percentage points |
 
-**The residual is one-directional because it is v1.5 correcting v1.** FastAAI 1
-encodes the stop codon `*` and ambiguous residues `X` as if they were amino
-acids. Its filtering k-merizer — `unique_kmers`, `fastaai.py:1421` — resolves
-tetramers through a `kmer_index` lookup that would admit only permissible
-symbols, but that table is never built and the function is never called; the
-numpy transform that runs instead takes `ord()` of every character. `X` is the
-damaging case: it arises from runs of `N`, so two unrelated genomes with
-sequencing gaps share `XXXX` and accrue similarity from it — a false positive
-that scales with assembly fragmentation.
-
-Full method, and the harness that produced it, in **[`fastaai2/methods/`](fastaai2/methods/)**.
+v1 and v1.5 differ in one respect that reaches the k-mers: v1 admits the stop
+symbol `*` and ambiguous residues `X`, v1.5 does not. See
+**[`fastaai2/methods/`](fastaai2/methods/)** for the data and the harness.
 
 ## Install
 
