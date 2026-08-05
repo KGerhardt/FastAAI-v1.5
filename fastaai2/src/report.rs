@@ -62,6 +62,14 @@ pub fn aai_label(out: &mut String, aai: f64, shared: u32, jac: f64) {
 pub const MATRIX_BELOW: f64 = 15.0;
 pub const MATRIX_ABOVE: f64 = 95.0;
 
+/// A genome against itself.
+///
+/// Not an estimate. The Jaccard->AAI regression is fitted and unbounded above,
+/// so feeding it a self-comparison returns something past 100 that then reports
+/// as `>90%` — uncertainty about a value that is not uncertain. Identity is
+/// given by the comparison, not inferred from it.
+pub const SELF_IDENTITY: f64 = 100.0;
+
 /// One AAI cell of a matrix.
 ///
 /// v1 writes 0 where a pair shares no marker, which a reader cannot tell from a

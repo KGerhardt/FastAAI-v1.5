@@ -341,3 +341,65 @@ def test_a_block_outside_the_grid_is_refused(tmp_path):
     db = fastaai.open_database(p)
     with pytest.raises(ValueError):
         db.search_block(db, 0, 99)
+
+
+def test_the_matrix_diagonal_is_identity_not_an_estimate(tmp_path):
+    """A genome against itself is 100 by definition.
+
+    The Jaccard->AAI regression is fitted and unbounded above, so consulting it
+    for a self-comparison returns a value past 100 that reports as the >90%
+    sentinel — uncertainty about something that is not uncertain.
+    """
+    p = _saved(tmp_path, "db", 6)
+    out = tmp_path / "m.matrix"
+    main(["query", "-q", p, "-o", str(out), "--output_style", "matrix", "--quiet"])
+
+    lines = out.read_text().splitlines()
+    names = lines[0].split("\t")[1:]
+    for i, line in enumerate(lines[1:]):
+        cells = line.split("\t")
+        assert cells[0] == names[i]
+        assert cells[1 + i] == "100.0", f"diagonal at {cells[0]}"
+
+
+def test_identical_genomes_that_are_not_the_same_genome_stay_estimates(tmp_path):
+    """Two entries that happen to match are a measurement at the ceiling.
+
+    Only the diagonal is tautological; equality of content is not identity.
+    """
+    db = fastaai.Database(["a0", "a1"])
+    for name in ("a", "b"):
+        db.add_genome(name, _scps(0))
+    db.seal()
+    db.filter_mode = "v1"
+    p = str(tmp_path / "db")
+    db.save(p)
+
+    out = tmp_path / "m.matrix"
+    main(["query", "-q", p, "-o", str(out), "--output_style", "matrix", "--quiet"])
+    rows = [ln.split("\t") for ln in out.read_text().splitlines()[1:]]
+    assert rows[0][1] == "100.0" and rows[1][2] == "100.0", "diagonal"
+    assert rows[0][2] == "95.0" and rows[1][1] == "95.0", "off-diagonal stays an estimate"
+
+
+def test_a_self_block_of_a_multi_partition_search_has_its_own_diagonal(tmp_path,
+                                                                       multipart):
+    """A multi-partition self-search splits its diagonal across the self-blocks.
+
+    Written per block rather than through the CLI: block (0, 0) here is
+    16,384 x 16,384 = 268M cells, which is not a thing to write in a test.
+    Partition 1 holds 116 genomes and makes the same point.
+    """
+    db = fastaai.open_database(multipart)
+    last = db.n_partitions - 1
+
+    self_block = tmp_path / "self.matrix"
+    db.write_block(db, last, last, str(self_block), 128, 1, False, "aai", "matrix")
+    lines = self_block.read_text().splitlines()
+    for i, line in enumerate(lines[1:]):
+        assert line.split("\t")[1 + i] == "100.0"
+
+    # A cross-partition block holds no genome against itself.
+    cross = tmp_path / "cross.matrix"
+    db.write_block(db, last, 0, str(cross), 128, 1, False, "aai", "matrix")
+    assert "100.0" not in cross.read_text()

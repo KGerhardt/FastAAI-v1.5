@@ -140,6 +140,13 @@ standing in for the two categorical labels, since a cell cannot hold a string.
 It is written per block exactly as the TSV is: each file is the Q×T grid for one
 partition pair, not for the whole search, so it carries no size restriction.
 
+**The diagonal of a self-comparison reads `100.0`.** A genome against itself is
+identical by definition, not by measurement; the regression is fitted and
+unbounded above, so consulting it there returns a value past 100 that reports as
+the `>90%` sentinel — uncertainty about something that is not uncertain. Only the
+true diagonal is exempt: two distinct genomes that happen to be identical are a
+measurement that came out at the ceiling, and still read `95.0`.
+
 Two deliberate departures from v1: a pair sharing no marker is `N/A` in the
 matrix where v1 writes `0`, which cannot be told from a real measurement of
 zero; and `poss_shared_SCPs` uses the `minimum` of v1's three bulk paths rather

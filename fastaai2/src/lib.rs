@@ -215,7 +215,7 @@ impl Database {
         let qcounts = (0..nq).map(|g| count(&qp, g)).collect();
         let tcounts = (0..nt).map(|g| count(tpr, g)).collect();
 
-        Ok(Block { jac, sh, sq, nq, nt, qcounts, tcounts })
+        Ok(Block { jac, sh, sq, nq, nt, qcounts, tcounts, selfblock })
     }
 }
 
@@ -229,6 +229,10 @@ struct Block {
     /// Accessions per genome, for `poss_shared_SCPs`.
     qcounts: Vec<u32>,
     tcounts: Vec<u32>,
+    /// True when this block is a partition against itself in the same database,
+    /// which is the only place a genome meets itself. Its diagonal is identity
+    /// by definition rather than by measurement.
+    selfblock: bool,
 }
 
 #[pymethods]
@@ -782,7 +786,7 @@ impl Database {
 
         let written = py.detach(|| -> std::io::Result<(usize, f64)> {
             let t0 = std::time::Instant::now();
-            let Block { jac, sh, sq, nq, nt, qcounts, tcounts } =
+            let Block { jac, sh, sq, nq, nt, qcounts, tcounts, selfblock } =
                 self.block_values(target, qi, ti, block, threads, stdev)?;
             let compute = t0.elapsed().as_secs_f64();
 
@@ -822,8 +826,14 @@ impl Database {
                         let idx = r * nt + c;
                         let j = jac[idx];
                         line.push('\t');
-                        report::aai_matrix_cell(&mut line, aai::kaai_to_aai(j),
-                                                sh[idx], j);
+                        if selfblock && r == c {
+                            // The genome against itself. Identity is given, not
+                            // estimated, so the regression is not consulted.
+                            report::fmt_py_round(&mut line, report::SELF_IDENTITY, 1);
+                        } else {
+                            report::aai_matrix_cell(&mut line, aai::kaai_to_aai(j),
+                                                    sh[idx], j);
+                        }
                     }
                     line.push('\n');
                     std::io::Write::write_all(&mut w, line.as_bytes())?;
