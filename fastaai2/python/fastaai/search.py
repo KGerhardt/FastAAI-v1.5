@@ -197,14 +197,19 @@ def _model_digest(hmm) -> str:
     Emissions and transitions are stored in the file as fixed-precision text and
     parsed to IEEE-754 floats, so the bytes are reproducible for anyone reading
     the same models.
-    """
-    import numpy as np
 
+    Read through the buffer protocol, which pyhmmer's matrices support, rather
+    than through numpy. The bytes are identical either way — verified across all
+    122 bundled models — so this does not change any stored fingerprint; it just
+    means the digest costs no dependency.
+    """
     h = hashlib.sha256()
     for attr in ("match_emissions", "insert_emissions", "transition_probabilities"):
-        arr = np.ascontiguousarray(np.asarray(getattr(hmm, attr), dtype=np.float32))
-        h.update(str(arr.shape).encode())
-        h.update(arr.tobytes())
+        mv = memoryview(getattr(hmm, attr))
+        if mv.format != "f":
+            raise TypeError(f"{attr}: expected float32 matrix, got format {mv.format!r}")
+        h.update(str(tuple(mv.shape)).encode())
+        h.update(mv.tobytes())
     return h.hexdigest()
 
 

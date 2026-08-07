@@ -220,6 +220,20 @@ FastAAI 1 compatible CLI, and optional per-pair Jaccard standard deviation
 
 Not yet packaged for bioconda.
 
+## Dependencies
+
+`pyrodigal`, `pyhmmer`, `pyfastx`, `numpy`. Only numpy is ours alone — none of
+the other three pull it in.
+
+**numpy 1.x and 2.x both work, and produce identical output.** The 2.0 removals
+(`np.float_` and friends) split a lot of downstream code; this package restricts
+itself to spellings valid under both, and `tests/test_numpy_compat.py` fails if
+one of the removed aliases is reintroduced. The suite passes under 1.26.4 and
+2.4.6, and a query gives byte-identical TSV, matrix and API results under each.
+
+numpy is used in one place — `SearchResult`, the in-memory Python API. The CLI
+does not touch it; formatting and output are Rust.
+
 ## Licence
 
 GPL-3.0-or-later — see [LICENSE](LICENSE). This is not only a preference:
