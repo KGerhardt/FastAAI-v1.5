@@ -68,14 +68,41 @@ mod tests {
         assert!((aai_to_kaai(90.0) - 0.8430).abs() < 5e-4);
     }
 
+    /// Monotone far below anything reachable, not only across the usable band.
+    /// A non-monotone patch would make AAI non-comparable in exactly the regime
+    /// this tool exists to serve — the bottom of the range.
     #[test]
-    fn is_monotone_increasing() {
+    fn is_monotone_increasing_over_the_whole_domain() {
         let mut prev = f64::NEG_INFINITY;
-        for i in 1..=200 {
-            let v = kaai_to_aai(i as f64 / 200.0);
-            assert!(v > prev, "not monotone at J = {}", i as f64 / 200.0);
+        // Log-spaced from 1e-300, then linear across the band.
+        for i in 0..=600 {
+            let j = 10f64.powf(-300.0 + 297.0 * (i as f64 / 600.0));
+            let v = kaai_to_aai(j);
+            assert!(v > prev, "not monotone at J = {j:e}");
             prev = v;
         }
+        // Continue upward from where the log sweep stopped. Restarting below it
+        // would compare against a larger J and fail on the sampling, not on the
+        // function.
+        for i in 1..=2000 {
+            let j = 1e-3 + (1.0 - 1e-3) * (i as f64 / 2000.0);
+            let v = kaai_to_aai(j);
+            assert!(v > prev, "not monotone at J = {j}");
+            prev = v;
+        }
+    }
+
+    /// The fit's asymptote is A*100 = -30.87%, so AAI is negative for tiny
+    /// Jaccard. Unreachable in practice: a per-SCP Jaccard is at least
+    /// ~1/660 and the mean over ~122 accessions bottoms out near 1e-5, seven
+    /// orders of magnitude above the crossing.
+    #[test]
+    fn the_negative_tail_exists_but_is_out_of_reach() {
+        assert!(kaai_to_aai(1e-13) < 0.0);
+        assert!(kaai_to_aai(1e-11) > 0.0);
+        assert!(kaai_to_aai(1.0 / 660.0 / 122.0) > 0.0);
+        // ...and it never dives below the asymptote.
+        assert!(kaai_to_aai(f64::MIN_POSITIVE) > A * 100.0);
     }
 
     #[test]
