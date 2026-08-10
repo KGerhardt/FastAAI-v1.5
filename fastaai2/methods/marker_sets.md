@@ -17,23 +17,85 @@ Nothing changed but the `--hmm` file. The accession list, k-mer sets, index,
 kernel and output all followed, and each set produced its own fingerprint, so
 databases built on different sets refuse to be compared.
 
-## The marker sets agree on AAI
+## Aggregate agreement is the wrong measure
 
-Same genome pairs, different markers:
+bac120 reproduces the 122-set's AAI to within half a point (median Δ −0.46,
+r = 0.9926), and even ar53 manages r = 0.97. But median AAI here is 44%, so
+almost every pair is unrelated and the correlation is mostly both sets agreeing
+that unrelated genomes are unrelated. It says nothing about whether the *top hit*
+is stable, which is what FastAAI is actually for.
 
-| | median Δ AAI | IQR | r |
+The measures below are on the full 2,943 genomes, scored against GTDB R232's own
+taxonomy (2,920 matched), and only on genomes that have a relative of the
+relevant rank present — failing to find one that is absent is not an error.
+Produced by `nearest_neighbours.py` and `worst_misses.py`; full tables in
+`retrieval_results.md`.
+
+## Retrieval is saturated, whichever markers you use
+
+Same-genus recall at N candidates (2,395 scorable):
+
+| marker set | markers recovered | top 1 | top 5 | top 10 |
+|---|---|---|---|---|
+| fastaai_122 | 78 | 99.04% | 100% | 100% |
+| bac120 | 119 | 99.16% | 100% | 100% |
+| ar53 | **7** | 98.79% | 99.87% | 100% |
+
+**ar53 is the result that settles it.** These are bacteria, so the archaeal set
+recovers seven markers — and retrieves a same-genus genome as the top hit 98.8%
+of the time. Seven conserved markers are enough to route correctly. Going from 78
+to 119 cannot improve on that because there is nothing left to win.
+
+Head to head on the rank of the first correct hit:
+
+| | bac120 better | fastaai_122 better | tied |
 |---|---|---|---|
-| bac120 vs fastaai_122 | −0.46 | 0.57 | **0.9926** |
-| ar53 vs fastaai_122 | +1.56 | 1.41 | 0.9729 |
+| genus (2,395) | 4 | 3 | 2,388 |
+| family (2,837) | 7 | 6 | 2,824 |
 
-**bac120 reproduces the 122-set's answers to within half an AAI point.** That is
-the result the GTDB direction rests on: switching to GTDB's markers does not move
-the numbers, so published FastAAI values stay interpretable.
+**Net +1 genome at genus and +1 at family.** bac120's extra 41 markers buy no
+measurable retrieval accuracy on this dataset.
 
-**ar53 is the control, and it is the more surprising row.** These are bacteria,
-so the archaeal set recovers 7 markers out of 53 — and still correlates at
-r = 0.97. AAI is robust to marker choice because single-copy ribosomal proteins
-are conserved; the choice changes precision, not the estimate.
+## The sets disagree on *which* neighbour, and it does not matter
+
+bac120 picks a different top hit than fastaai_122 for 11.1% of scorable genomes
+(ar53: 25%). Of those disagreements:
+
+| | | |
+|---|---|---|
+| both picks are same-genus — benign reordering | 261 | **97.8%** |
+| exactly one correct | 5 | 1.9% |
+| neither correct | 1 | 0.4% |
+
+The sets shuffle the order among equally-valid congeners. The *set* of near
+neighbours is stable even though the ranking within it is not, which is what a
+candidate-reduction step needs.
+
+## The worst misses are sister-family calls, not weak genomes
+
+Rank of the first correct hit, `fastaai_122`:
+
+| rank | P50 | P99 | P99.9 | max | misses beyond top 5 |
+|---|---|---|---|---|---|
+| species | 0 | 0 | 1 | 1 | 0 |
+| genus | 0 | 0 | 2 | 4 | 0 |
+| family | 0 | 1 | 10 | **63** | 6 (0.21%) |
+
+A top-100 shortlist captures every correct answer in this dataset, and genus
+needs only top-5.
+
+The six family misses carry a **median 78 SCPs — identical to the population**,
+so they are not marker-poor genomes that a wider shortlist would rescue. Every
+one is an adjacent-family confusion in the 50–62% AAI band:
+
+    Streptococcaceae -> Enterococcaceae   58.68     (both Lactobacillales)
+    Vagococcaceae    -> Enterococcaceae   62.05
+    Halarsenatibac.  -> Halanaerobiac.    50.68
+    UBA6769          -> Guptibacillaceae  59.16
+
+Half involve GTDB placeholder families (`YIM-B00363`, `NBRC-103111`, `UBA6769`)
+where the boundary is provisional, so the truth label is itself soft. bac120
+trades on these rather than fixing them — it improves four and worsens two.
 
 ## What a richer marker set costs
 
@@ -46,11 +108,17 @@ markers is more signal, and it is not free:
 - **index 2.6× larger** — more SCPs per genome is more k-mers
 - **search 3× slower per thread** — every pair crosses more populated accessions
 
-None of that is a defect. It is the cost of the extra markers, and it is paid
-once at build time for the index and per query for the search. Whether it is
-worth it depends on whether 119 markers buys resolution that 78 does not, which
-these data do not answer — the AAI values agree, so on this evidence the extra
-markers mostly buy confidence rather than a different answer.
+None of that is a defect — it is the cost of carrying the extra markers. But the
+retrieval results above show those markers buy no accuracy here, so on this
+dataset the cost is unrecovered.
+
+**The case for bac120 is not accuracy — it is shared preprocessing.** GTDB-Tk's
+`identify` step already runs Prodigal and hmmsearch against exactly these
+markers. A pipeline that classifies with GTDB-Tk and reduces candidates with
+FastAAI pays that stage once instead of twice, and FastAAI's own cost collapses
+to k-merisation and search, which is seconds. Read that way the 2.5x HMM-search
+penalty is not a cost FastAAI adds; it is a cost the pipeline is already paying,
+and FastAAI riding along on it is free.
 
 ## Provenance, and why this is not GTDB's own file
 
