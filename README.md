@@ -16,6 +16,10 @@ FFI back to the same libraries for nothing. Rust takes k-merisation, the inverte
 index, the counting kernel and the AAI transform, which is where v1 was bound by
 Python's parallelism.
 
+## Goals:
+
+The purposes of this codebase are: (1) a stable release for FastAAI v1 to serve as the basis for future bioconda installation. (2) A version of the program able to run within reasonable RAM limits for a personal computer on any size of database, while scaling effectively to any HPC platform. (3) It is a Single Copy Protein (SCP)-agnostic revision of the code, able to work with other sets of universal marker genes and not just the specific set selected in FastAAI v1, (4) Preparation for a FastAAI 2, intended to work as a complementary search engine inside GTDB-tk.
+
 ## Performance
 
 **Search**, 8 threads, wall clock less the ~0.22 s interpreter start both
