@@ -405,3 +405,19 @@ def test_models_are_built_once_per_worker_not_per_task(tmp_path, monkeypatch):
         "the initializer should build exactly one per process"
     )
     assert len(builds) < len(prots), "fewer builds than tasks"
+
+
+def test_parallel_preprocessing_requires_an_output_directory(tmp_path):
+    """A worker with nowhere to write must hand its proteins back, and they
+    would be pickled across the process boundary — the cost the whole design
+    avoids, paid silently. Refuse instead."""
+    from fastaai.pipeline import preprocess_paths
+    from fastaai.search import ModelSet
+
+    prots = [_protein_file(tmp_path, "guard")]
+    with pytest.raises(ValueError, match="needs somewhere to write"):
+        preprocess_paths(prots, ModelSet(), processes=4)
+
+    # Serial is fine: nothing crosses a boundary, so the data is free to keep.
+    recs = preprocess_paths(prots, ModelSet(), processes=1, input_kind="protein")
+    assert recs[0].proteins is not None

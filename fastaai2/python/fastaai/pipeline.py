@@ -173,6 +173,17 @@ def preprocess_paths(
     if not paths:
         return []
 
+    if processes > 1 and archive_root is None and crystal_root is None:
+        # With nowhere to write, a worker has no choice but to hand its proteins
+        # and hits back, and they would be pickled across the boundary — the one
+        # cost this whole design exists to avoid, paid silently. Say so.
+        raise ValueError(
+            "preprocess_paths(processes>1) needs somewhere to write: pass "
+            "crystal_root, archive_root, or both. Without one, every worker "
+            "would return its proteins and hits and pay to pickle them; use "
+            "processes=1 if you genuinely want the data in memory."
+        )
+
     work = [(os.fspath(p), mode, input_kind,
              None if crystal_root is None else os.fspath(crystal_root),
              compress,
