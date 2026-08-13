@@ -16,9 +16,22 @@ next with nothing held in between, and a step can be run for a thousand genomes
 across a cluster and gathered afterwards. `preprocess` is the convenience form
 that runs the whole chain from whichever rank you happen to have.
 
-Steps are per-genome and single-threaded; `preprocess` does the parallelism.
-That split is deliberate — a caller distributing work across nodes wants the
-unit of work, not a thread pool it has to fight.
+Each step comes in two forms: a **unit** that does one genome, and a **driver**
+that runs the unit over many in parallel — `genome_to_protein` and
+`genomes_to_proteins`, `protein_to_hmm` and `proteins_to_hmms`. The unit is
+single-threaded and returns a path; the driver owns the parallelism.
+
+`all_steps` is the whole chain for one genome — predict, search, resolve, write
+— **with nothing returned between stages**. That is the shape the parallelism
+wants: one worker owns one genome from FASTA to crystal, so no intermediate
+result crosses a process boundary and there is no funnel to coordinate through.
+`preprocess` is its driver.
+
+**Processes, not threads.** The work is already thousands of independent
+per-file units, so a shared interpreter buys nothing and costs a serial
+fraction. `multiprocessing.Pool.imap_unordered` throughout: results as they
+finish, which is what progress reporting wants, with order restored by index
+where a function promises it.
 """
 
 from __future__ import annotations
@@ -35,9 +48,80 @@ from .predict import predict_proteins
 from .search import DEFAULT_FILTER, FilterMode, Hit, ModelSet, resolve_hits, search_hits
 
 
+def _indexed(args):
+    """Run one unit, carrying its position so order survives `imap_unordered`.
+
+    The worker is passed by reference rather than closed over — module-level
+    functions pickle as a name, closures do not pickle at all.
+    """
+    i, fn, payload = args
+    return i, fn(payload)
+
+
+def _run(fn, work: list, processes: int, chunksize: int = 1) -> list:
+    """Map *fn* over *work*, in this process or a pool, preserving order.
+
+    `imap_unordered` rather than `map`: results come back as they finish, so a
+    long genome cannot hold up the reporting of the hundred that finished behind
+    it, and memory does not accumulate a completed-but-unyielded backlog.
+    """
+    if not work:
+        return []
+    if processes <= 1:
+        return [fn(w) for w in work]
+
+    import multiprocessing as mp
+
+    out: list = [None] * len(work)
+    tagged = [(i, fn, w) for i, w in enumerate(work)]
+    with mp.Pool(processes=processes) as pool:
+        for i, result in pool.imap_unordered(_indexed, tagged, chunksize=chunksize):
+            out[i] = result
+    return out
+
+
 def _models(models) -> ModelSet:
     """A ModelSet from a ModelSet, a path, a keyword, or None for the default."""
     return models if isinstance(models, ModelSet) else ModelSet(models)
+
+
+def _predict_unit(args):
+    from .predict import predict_proteins
+
+    genome, out_dir, compress, name = args
+    proteins, _table = predict_proteins(genome)
+    return os.fspath(layout.write_text(
+        Path(out_dir) / f"{layout.safe(name)}{layout.FASTA_EXT}",
+        "".join(f">{p}\n{s}\n" for p, s in proteins.items()), compress))
+
+
+def _hmm_unit(args):
+    from .ingest import read_proteins_fasta
+
+    protein, out_dir, spec, compress, name, cpus = args
+    ms = _worker_models(spec)
+    hits = search_hits(read_proteins_fasta(protein), ms, cpus=cpus)
+    return os.fspath(layout.write_text(
+        Path(out_dir) / f"{layout.safe(name)}{layout.TABLE_EXT}",
+        _name_line(name) + HITS_COLUMNS
+        + "".join(f"{h.protein}\t{h.accession}\t{h.score:.4f}\n" for h in hits),
+        compress))
+
+
+def _worker_models(spec) -> ModelSet:
+    """The model set for this process, built once.
+
+    Under `fork` the parent's set is already here and this never runs; under
+    `spawn` it rebuilds from the spec, because a `ModelSet` holds pyhmmer
+    objects and cannot be pickled. Either way it is per *process*, not per task
+    — FastAAI 1 reloaded models per task and a 16-way pool spent ~66 s parsing.
+    """
+    global _WORKER_MODELS
+    try:
+        return _WORKER_MODELS
+    except NameError:
+        _WORKER_MODELS = _models(spec)
+        return _WORKER_MODELS
 
 
 def genome_to_protein(genome, out_dir, *, compress: bool = False,
@@ -48,13 +132,16 @@ def genome_to_protein(genome, out_dir, *, compress: bool = False,
     later; v1's >10% hysteresis applies, without which table 4 wins on most
     genomes for no biological reason.
     """
-    name = name or genome_name(genome)
-    proteins, table = predict_proteins(genome)
-    return layout.write_text(
-        Path(out_dir) / f"{layout.safe(name)}{layout.FASTA_EXT}",
-        "".join(f">{p}\n{s}\n" for p, s in proteins.items()),
-        compress,
-    )
+    return Path(_predict_unit((os.fspath(genome), os.fspath(out_dir), compress,
+                               name or genome_name(genome))))
+
+
+def genomes_to_proteins(genomes: Iterable, out_dir, *, compress: bool = False,
+                        processes: int = 1) -> list[Path]:
+    """`genome_to_protein` over many, in parallel. Returns paths in input order."""
+    work = [(os.fspath(g), os.fspath(out_dir), compress, genome_name(g))
+            for g in genomes]
+    return [Path(p) for p in _run(_predict_unit, work, processes)]
 
 
 def protein_to_hmm(protein, out_dir, models=None, *, compress: bool = False,
@@ -65,17 +152,19 @@ def protein_to_hmm(protein, out_dir, models=None, *, compress: bool = False,
     depends on the best-hit filter, and storing the raw table means the filter
     can be changed later without searching again.
     """
-    from .ingest import read_proteins_fasta
+    spec = models.spec if isinstance(models, ModelSet) else models
+    return Path(_hmm_unit((os.fspath(protein), os.fspath(out_dir), spec, compress,
+                           name or genome_name(protein), cpus)))
 
-    name = name or genome_name(protein)
-    ms = _models(models)
-    hits = search_hits(read_proteins_fasta(protein), ms, cpus=cpus)
-    return layout.write_text(
-        Path(out_dir) / f"{layout.safe(name)}{layout.TABLE_EXT}",
-        _name_line(name) + HITS_COLUMNS
-        + "".join(f"{h.protein}\t{h.accession}\t{h.score:.4f}\n" for h in hits),
-        compress,
-    )
+
+def proteins_to_hmms(proteins: Iterable, out_dir, models=None, *,
+                     compress: bool = False, processes: int = 1,
+                     cpus: int = 1) -> list[Path]:
+    """`protein_to_hmm` over many, in parallel. Returns paths in input order."""
+    spec = models.spec if isinstance(models, ModelSet) else models
+    work = [(os.fspath(p), os.fspath(out_dir), spec, compress, genome_name(p), cpus)
+            for p in proteins]
+    return [Path(p) for p in _run(_hmm_unit, work, processes)]
 
 
 def read_hit_table(path) -> tuple[str | None, list[Hit]]:
@@ -159,13 +248,32 @@ def prot_hmm_to_crystal(pairs: Iterable[tuple], out_dir, models=None, *,
     ms = _models(models)
     work = [(os.fspath(a), os.fspath(b), os.fspath(out_dir), ms.fingerprint,
              filter_mode, compress) for a, b in ((p[0], p[1]) for p in pairs)]
-    if processes <= 1:
-        out = [_pair_to_crystal(w) for w in work]
-    else:
-        from concurrent.futures import ProcessPoolExecutor
-        with ProcessPoolExecutor(max_workers=processes) as pool:
-            out = list(pool.map(_pair_to_crystal, work, chunksize=16))
+    out = _run(_pair_to_crystal, work, processes, chunksize=16)
     return [Path(p) for p in out if p is not None]
+
+
+def all_steps(genome, directory=layout.DEFAULT_ROOT, models=None, *,
+              filter_mode: FilterMode = DEFAULT_FILTER, compress: bool = False,
+              input_kind: str = "auto"):
+    """One genome, all the way to a crystal, in this process.
+
+    Predict, search, resolve, write — with **nothing returned between stages**.
+    The intermediate proteins and hits go straight to their files; only a small
+    record comes back. That is what makes this the right unit to parallelise:
+    a worker owns a genome from FASTA to crystal, so no sequence crosses a
+    process boundary and there is no collector to funnel through.
+
+    Running the three steps as three parallel passes would be the same work with
+    two extra synchronisation points and the intermediates read back off disk.
+    """
+    from .pipeline import preprocess_one
+
+    site = layout.Layout(directory, compress)
+    site.sub(layout.PROTEINS, create=True)
+    site.sub(layout.HMM_HITS, create=True)
+    site.sub(layout.CRYSTALS, create=True)
+    return preprocess_one(genome, _models(models), filter_mode, input_kind,
+                          site.crystals, compress, site.root)
 
 
 def build_database(crystals, models=None, *, k: int | None = None,
@@ -192,7 +300,7 @@ def build_database(crystals, models=None, *, k: int | None = None,
 def preprocess(genomes=None, proteins=None, PH_tups=None, crystals=None,
                directory=layout.DEFAULT_ROOT, database="database", *,
                models=None, filter_mode: FilterMode = DEFAULT_FILTER,
-               threads: int = 4, compress: bool = False, save: bool = True,
+               processes: int = 4, compress: bool = False, save: bool = True,
                progress=None):
     """Any input to a database in one call.
 
@@ -229,14 +337,15 @@ def preprocess(genomes=None, proteins=None, PH_tups=None, crystals=None,
             site.sub(layout.HMM_HITS, create=True)
             site.sub(layout.CRYSTALS, create=True)
             preprocess_paths(
-                paths, ms, mode=filter_mode, threads=threads, progress=progress,
+                paths, ms, mode=filter_mode, processes=processes, progress=progress,
                 archive_root=site.root, input_kind=kind,
                 crystal_root=site.crystals, compress=compress,
             )
 
     if pairs:
         prot_hmm_to_crystal(pairs, site.sub(layout.CRYSTALS, create=True), ms,
-                            filter_mode=filter_mode, compress=compress)
+                            filter_mode=filter_mode, compress=compress,
+                            processes=processes)
 
     sources = [site.crystals] if _crystal.crystal_paths(site.crystals) else []
     for extra in _as_list(crystals):

@@ -7,11 +7,14 @@ owns k-merisation, the inverted index, counting and the AAI transform.
 from . import _core
 from .ingest import find_genomes, genome_name, read_fasta
 from .api import (
+    all_steps,
     build_database,
     genome_to_protein,
+    genomes_to_proteins,
     preprocess,
     prot_hmm_to_crystal,
     protein_to_hmm,
+    proteins_to_hmms,
     read_hit_table,
 )
 from .pipeline import (
@@ -60,15 +63,18 @@ __all__ = [
     "jaccard_to_aai",
     "kmerize",
     "predict_proteins",
+    "all_steps",
     "build_database",
     "build_from_crystals",
     "crystallize_archive",
     "genome_to_protein",
+    "genomes_to_proteins",
     "preprocess",
     "preprocess_one",
     "preprocess_paths",
     "prot_hmm_to_crystal",
     "protein_to_hmm",
+    "proteins_to_hmms",
     "read_hit_table",
     "read_fasta",
     "search",

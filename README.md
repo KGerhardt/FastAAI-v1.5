@@ -441,19 +441,33 @@ reimplemented, and the output is asserted byte-for-byte against
 search too large to hold in memory writes its blocks straight from Rust
 instead.
 
-Or one step at a time. Each takes and returns **paths**, so a step can be run
-for a thousand genomes across a cluster and the results gathered afterwards;
-the steps are per-genome and single-threaded, and `preprocess` is what adds the
-thread pool.
+Or one step at a time. Each step comes in two forms — a **unit** that does one
+genome and returns a path, and a **driver** that runs it over many in parallel:
 
 ```python
-prot = fastaai.genome_to_protein("g.fna.gz", "FastAAI/proteins")
-hits = fastaai.protein_to_hmm(prot, "FastAAI/hmm_hits")          # --hmm set optional
-cry  = fastaai.prot_hmm_to_crystal([(prot, hits)], "FastAAI/crystals")
+prots = fastaai.genomes_to_proteins(genomes, "FastAAI/proteins", processes=8)
+hits  = fastaai.proteins_to_hmms(prots, "FastAAI/hmm_hits", processes=8)
+cry   = fastaai.prot_hmm_to_crystal(zip(prots, hits), "FastAAI/crystals", processes=8)
 
-db   = fastaai.build_database("FastAAI/crystals", save_to="FastAAI/database/firm")
-res  = fastaai.search(db, db, threads=8)
+db    = fastaai.build_database("FastAAI/crystals", save_to="FastAAI/database/firm")
+res   = fastaai.search(db, db, threads=8)
 ```
+
+`all_steps(genome, directory)` is the whole chain for one genome — predict,
+search, resolve, write — with nothing returned between stages, and `preprocess`
+is its driver. That is the shape the parallelism wants: one worker owns one
+genome from FASTA to crystal, so no intermediate crosses a process boundary and
+there is no collector to funnel through. Running the three steps as three
+parallel passes would be the same work with two extra synchronisation points
+and the intermediates read back off disk.
+
+**Processes, not threads**, throughout preprocessing —
+`multiprocessing.Pool.imap_unordered`, results as they finish, input order
+restored by index. The work is already thousands of independent per-file units,
+so a shared interpreter buys nothing and costs a serial fraction. It matters
+most where the work is plain Python: the crystal step runs at 0.65–0.90x of
+serial on threads and 5–6x on processes, because pyfastx holds the GIL. Only
+`search` is threaded, in Rust, where it belongs.
 
 `prot_hmm_to_crystal` takes `(protein_path, hmm_path)` pairs and accepts either
 this package's hit tables or HMMER's own `--tblout`, so a caller who already ran
@@ -499,7 +513,7 @@ unverifiable rather than treated as a conflict.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 258 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 262 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
-                                as_completed)
 from dataclasses import dataclass
 from typing import Callable, Iterable, NamedTuple
 
@@ -35,6 +33,12 @@ class GenomeRecord:
     #: predicted protein a stored SCP sequence came from. Small — one short
     #: string per SCP — so it survives `release()`.
     scp_proteins: dict[str, str] | None = None
+    #: Counts, which are what a worker reports when the data itself went to
+    #: disk. Sized in bytes rather than megabytes, so they cross a process
+    #: boundary for free.
+    n_proteins: int = 0
+    n_hits: int = 0
+    n_scps: int = 0
 
     def release(self) -> None:
         """Drop the bulky fields once archived — proteins are ~900 KB/genome."""
@@ -49,8 +53,9 @@ def preprocess_one(
     input_kind: str = "auto",
     crystal_root=None,
     compress: bool = False,
+    archive_root=None,
 ) -> GenomeRecord:
-    """Predict (if needed) and HMM-search one input.
+    """Predict (if needed), HMM-search and resolve one genome, writing its ranks.
 
     *input_kind* is `"genome"`, `"protein"`, or `"auto"` to guess from the
     extension. Protein input skips Prodigal entirely — which is the whole
@@ -58,11 +63,12 @@ def preprocess_one(
     600k genomes would be ~4 s each of pure waste. Prodigal remains mandatory
     for query genomes, which arrive as nucleotides.
 
-    With *crystal_root* the worker writes its own crystal, which is the point at
-    which this genome stops needing to be held: formatting (and compression, if
-    asked for) happens on the worker thread instead of the collector, and the
-    caller can drop the sequences immediately rather than carrying every
-    genome's SCPs until the build.
+    **The worker writes its own files.** With *archive_root* it writes the
+    proteins and the hit table; with *crystal_root*, the crystal. Everything a
+    genome produces is on disk before this returns, and the record it hands back
+    carries counts rather than sequence. That is what makes the unit of work
+    shippable to another process — a collector that had to receive the proteins
+    would spend more time unpickling them than predicting them.
     """
     name = genome_name(path)
     if input_kind == "auto":
@@ -76,21 +82,59 @@ def preprocess_one(
         assignment = resolve_hits(hits, mode)
         scps = {acc: proteins[prot] for prot, acc in assignment.items()}
         origins = {acc: prot for prot, acc in assignment.items()}
+
+        if archive_root is not None:
+            from .archive import write_genome
+            write_genome(archive_root, name, proteins, hits, compress)
         if crystal_root is not None:
             from . import crystal
             crystal.write(crystal_root, name, scps, models.fingerprint, mode,
                           table, origins, compress)
-        return GenomeRecord(name, scps, table, proteins=proteins, hits=hits,
-                            scp_proteins=origins)
+
+        rec = GenomeRecord(name, scps, table)
+        rec.n_proteins, rec.n_hits = len(proteins), len(hits)
+        if archive_root is not None or crystal_root is not None:
+            # On disk already; carrying it further is the cost this avoids.
+            rec.scps = {}
+            rec.n_scps = len(scps)
+        else:
+            rec.n_scps = len(scps)
+            rec.proteins, rec.hits, rec.scp_proteins = proteins, hits, origins
+        return rec
     except Exception as exc:  # a bad genome must not abort the run
         return GenomeRecord(name, {}, None, error=f"{type(exc).__name__}: {exc}")
+
+
+def _preprocess_indexed(args):
+    """`_preprocess_task` carrying its position, so `imap_unordered` can report
+    genomes as they finish while the returned list stays in input order."""
+    i, work = args
+    return i, _preprocess_task(work)
+
+
+def _preprocess_task(args) -> GenomeRecord:
+    """A worker's whole job. Module level and over plain values, so it pickles.
+
+    The model set is rebuilt from its spec inside the worker rather than sent:
+    it holds pyhmmer objects, which are not picklable, and rebuilding it is a
+    per-process cost of ~0.2 s. FastAAI 1 reloaded models per *task*, which on a
+    16-process pool cost ~66 s of pure parsing; per worker it is invisible.
+    """
+    path, spec, mode, input_kind, crystal_root, compress, archive_root = args
+    global _WORKER_MODELS
+    try:
+        ms = _WORKER_MODELS
+    except NameError:
+        ms = _WORKER_MODELS = ModelSet(spec)
+    return preprocess_one(path, ms, mode, input_kind, crystal_root, compress,
+                          archive_root)
 
 
 def preprocess_paths(
     paths: Iterable[os.PathLike | str],
     models: ModelSet,
     mode: FilterMode = DEFAULT_FILTER,
-    threads: int = 4,
+    processes: int = 4,
     progress: Callable[[int, int, GenomeRecord], None] | None = None,
     archive_root=None,
     input_kind: str = "auto",
@@ -99,50 +143,62 @@ def preprocess_paths(
 ) -> list[GenomeRecord]:
     """Predict and HMM-search every genome. Order of *paths* is preserved.
 
-    Threaded, not forked: pyrodigal and pyhmmer both release the GIL.
+    **Processes, not threads.** pyrodigal and pyhmmer do release the GIL, but
+    that only removes an obstacle — it does not make N threads in one
+    interpreter competitive with N independent single-threaded workers, and a
+    real share of the work here is plain Python that holds the GIL anyway:
+    building the protein dict, resolving best hits, formatting the crystal.
+    The task decomposes into thousands of small, independent, single-threaded
+    units, which is what processes are for. Measured on the crystal step alone,
+    threads ran at 0.65-0.90x of serial while processes reached 5-6x.
 
-    With *archive_root*, proteins and raw hits are written as each genome
-    finishes and then released, so peak memory stays flat and the run never has
-    to be repeated.
-
-    **With *crystal_root*, each worker writes its own crystal and the returned
-    records come back with `scps` cleared.** That is the point of it: the SCPs
-    are on disk, so nothing needs to hold every genome's sequences until the
-    build, and peak memory stops depending on how many genomes there are.
-    Build from the crystal directory with `build_from_crystals`; the records are
-    metadata for reporting, not a second copy of the data.
+    Measured on 16 genomes at 8 workers, threads and processes come out level
+    for *these two stages* — 5.32x against 5.44x — because pyrodigal and pyhmmer
+    dominate and do release the GIL. Processes are used anyway, and the reason
+    is design rather than that number: the work is already decomposed into
+    thousands of independent per-file units, so a shared interpreter buys
+    nothing and costs a funnel. Each worker writes its own ranks and returns
+    counts, so there is no single writer to coordinate through, no sequence
+    crossing a boundary, and no serial fraction to run into Amdahl at high
+    worker counts. Threaded, the same 16 genomes peaked at 1.37 GB in one heap;
+    per-process peaks are independent.
     """
     paths = list(paths)
+    if not paths:
+        return []
+
+    work = [(os.fspath(p), models.spec, mode, input_kind,
+             None if crystal_root is None else os.fspath(crystal_root),
+             compress,
+             None if archive_root is None else os.fspath(archive_root))
+            for p in paths]
+
+    # The two files that describe the run, written once by the parent rather
+    # than raced over by every worker.
+    if archive_root is not None:
+        Archive(archive_root, models.accessions, models.fingerprint, compress)
+
+    workers = max(1, processes)
     out: list[GenomeRecord | None] = [None] * len(paths)
-    archive = (Archive(archive_root, models.accessions, models.fingerprint,
-                       compress)
-               if archive_root else None)
-    with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
-        futures = {
-            pool.submit(preprocess_one, p, models, mode, input_kind,
-                        crystal_root, compress): i
-            for i, p in enumerate(paths)
-        }
-        done = 0
-        for fut in as_completed(futures):
-            i = futures[fut]
-            rec = fut.result()
-            if archive is not None and rec.proteins is not None:
-                archive.add(rec.name, rec.proteins, rec.hits or [],
-                            rec.translation_table)
-            rec.release()
-            if crystal_root is not None:
-                # Written by the worker and now on disk, so the SCPs need not be
-                # carried for the rest of the run. This is what keeps peak
-                # memory independent of collection size.
-                rec.scps = {}
-                rec.scp_proteins = None
-            out[i] = rec
-            done += 1
+    if workers == 1:
+        for i, w in enumerate(work):
+            out[i] = _preprocess_task(w)
             if progress:
-                progress(done, len(paths), rec)
-    if archive is not None:
-        archive.close()
+                progress(i + 1, len(paths), out[i])
+    else:
+        import multiprocessing as mp
+
+        # chunksize 1: a genome is seconds of work, so handing them out one at a
+        # time costs nothing and keeps a slow genome from stranding a chunk.
+        tagged = list(enumerate(work))
+        with mp.Pool(processes=workers) as pool:
+            done = 0
+            for i, rec in pool.imap_unordered(_preprocess_indexed, tagged,
+                                              chunksize=1):
+                out[i] = rec
+                done += 1
+                if progress:
+                    progress(done, len(paths), rec)
     return [r for r in out if r is not None]
 
 
@@ -283,9 +339,12 @@ def crystallize_archive(root, out, models: ModelSet,
             for g in names]
     if processes <= 1:
         return sum(_crystallize_one(w) for w in work)
+
+    import multiprocessing as mp
+
     # Chunked because the per-item cost is milliseconds and the dispatch is not.
-    with ProcessPoolExecutor(max_workers=processes) as pool:
-        return sum(pool.map(_crystallize_one, work, chunksize=16))
+    with mp.Pool(processes=processes) as pool:
+        return sum(pool.imap_unordered(_crystallize_one, work, chunksize=16))
 
 
 def _select(spec, names: list[str]) -> list[int]:

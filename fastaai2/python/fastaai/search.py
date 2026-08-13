@@ -200,6 +200,10 @@ class ModelSet:
         #: None selects the bundled set, so callers need not know where it lives.
         #: A string may also be a keyword from `MODEL_SETS`, which can name more
         #: than one file.
+        #: What this set was asked for — None, a keyword, or a path. Kept so a
+        #: worker process can rebuild the set rather than receive it: the models
+        #: hold pyhmmer objects and are not picklable.
+        self.spec = path
         self.paths = [bundled_hmm_path()] if path is None else resolve_model_spec(path)
         #: The first source, kept because it is what a single-file set *is*.
         self.path = self.paths[0]

@@ -87,18 +87,7 @@ class Archive:
 
     def add(self, genome: str, proteins: dict[str, str], hits: list[Hit],
             translation_table: int | None = None) -> None:
-        stem = layout.safe(genome)
-        layout.write_text(
-            self.root / layout.PROTEINS / f"{stem}{layout.FASTA_EXT}",
-            "".join(f">{name}\n{seq}\n" for name, seq in proteins.items()),
-            self.compress,
-        )
-        layout.write_text(
-            self.root / layout.HMM_HITS / f"{stem}{layout.TABLE_EXT}",
-            _name_line(genome) + HITS_COLUMNS + "".join(
-                f"{h.protein}\t{h.accession}\t{h.score:.4f}\n" for h in hits),
-            self.compress,
-        )
+        write_genome(self.root, genome, proteins, hits, self.compress)
         self._n += 1
 
     def close(self) -> int:
@@ -109,6 +98,29 @@ class Archive:
 
     def __exit__(self, *exc):
         self.close()
+
+
+def write_genome(root, genome: str, proteins: dict[str, str], hits: list[Hit],
+                 compress: bool = False) -> None:
+    """One genome's proteins and hits, as two files.
+
+    Module level and holding no state, so the worker that produced a genome can
+    write it directly. That is what lets preprocessing run in separate processes:
+    a worker owns its genome end to end and sends back only a summary, instead of
+    shipping megabytes of sequence to a collector.
+    """
+    stem = layout.safe(genome)
+    layout.write_text(
+        Path(root) / layout.PROTEINS / f"{stem}{layout.FASTA_EXT}",
+        "".join(f">{name}\n{seq}\n" for name, seq in proteins.items()),
+        compress,
+    )
+    layout.write_text(
+        Path(root) / layout.HMM_HITS / f"{stem}{layout.TABLE_EXT}",
+        _name_line(genome) + HITS_COLUMNS + "".join(
+            f"{h.protein}\t{h.accession}\t{h.score:.4f}\n" for h in hits),
+        compress,
+    )
 
 
 def read_models(root) -> list[str]:

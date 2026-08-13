@@ -114,7 +114,8 @@ def _load_or_build(source, models, args, log) -> "_core.Database":
         # those — one route into an index, and the crystals stay.
         dest = p / layout.CRYSTALS
         n = crystallize_archive(p, dest, models if models is not None else ModelSet(),
-                                mode=args.filter, compress=args.compress)
+                                mode=args.filter, compress=args.compress,
+                                processes=args.preprocess_processes)
         log(f"  resolved {n} crystals from stored proteins and hits into {dest}/")
         db = build_from_crystals(dest, models if models is not None else ModelSet())
         log(f"  built {db.n_genomes} genomes")
@@ -156,7 +157,7 @@ def _load_or_build(source, models, args, log) -> "_core.Database":
     log(f"  writing to {site.root}/")
 
     records = preprocess_paths(
-        paths, models, mode=args.filter, threads=args.preprocess_threads,
+        paths, models, mode=args.filter, processes=args.preprocess_processes,
         progress=progress, archive_root=site.root, input_kind=args.input_kind,
         crystal_root=site.crystals, compress=site.compress,
     )
@@ -247,8 +248,11 @@ def _common(p):
                         + " (default: the bundled 122-SCP set)")
     p.add_argument("--threads", type=int, default=DEFAULT_SEARCH_THREADS,
                    help=f"threads for the counting kernel (default {DEFAULT_SEARCH_THREADS})")
-    p.add_argument("--preprocess-threads", type=int, default=4,
-                   help="threads for gene prediction and HMM search (default 4)")
+    p.add_argument("--processes", dest="preprocess_processes", type=int, default=4,
+                   help="worker processes for preprocessing — prediction, HMM "
+                        "search and crystallising (default 4). Processes, not "
+                        "threads: each genome is an independent unit that "
+                        "writes its own files")
     p.add_argument("--filter", choices=("v1", "v1_alt", "rbh"), default=DEFAULT_FILTER,
                    help="best-hit resolution")
     p.add_argument("--input", dest="input_kind",

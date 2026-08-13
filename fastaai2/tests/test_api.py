@@ -93,10 +93,10 @@ def test_preprocess_entry_points_agree(tmp_path, kind):
     prots = [_protein_file(tmp_path, f"g{i}") for i in range(3)]
 
     ref = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "ref"),
-                             save=False, threads=2)
+                             save=False, processes=2)
     if kind == "proteins":
         got = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "b"),
-                                 save=False, threads=2)
+                                 save=False, processes=2)
     else:
         got = fastaai.preprocess(crystals=str(tmp_path / "ref" / "crystals"),
                                  directory=str(tmp_path / "c"), save=False)
@@ -111,7 +111,7 @@ def test_preprocess_fills_the_run_directory(tmp_path):
     prots = [_protein_file(tmp_path, f"h{i}") for i in range(2)]
     root = tmp_path / "run"
     fastaai.preprocess(proteins=prots, directory=str(root), database="firm",
-                       threads=2)
+                       processes=2)
     assert (root / "crystals").is_dir()
     assert (root / "hmm_hits").is_dir()
     assert (root / "database" / "firm").is_dir(), "named database under database/"
@@ -121,12 +121,12 @@ def test_preprocess_combines_ranks(tmp_path):
     """Ranks are additive: crystals from elsewhere join the ones just made."""
     a = [_protein_file(tmp_path, "x0")]
     first = tmp_path / "first"
-    fastaai.preprocess(proteins=a, directory=str(first), save=False, threads=1)
+    fastaai.preprocess(proteins=a, directory=str(first), save=False, processes=1)
 
     b = [_protein_file(tmp_path, "y0")]
     combined = fastaai.preprocess(
         proteins=b, crystals=str(first / "crystals"),
-        directory=str(tmp_path / "both"), save=False, threads=1)
+        directory=str(tmp_path / "both"), save=False, processes=1)
     assert combined.n_genomes == 2, combined.genome_names
 
 
@@ -135,7 +135,7 @@ def test_preprocess_combines_ranks(tmp_path):
 def _tiny_result(tmp_path):
     prots = [_protein_file(tmp_path, f"r{i}") for i in range(3)]
     db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "res"),
-                            save=False, threads=2)
+                            save=False, processes=2)
     return db, fastaai.search(db, db, threads=1)
 
 
@@ -193,7 +193,7 @@ def test_to_tsv_matches_the_engine_byte_for_byte(tmp_path, stdev):
     """
     prots = [_protein_file(tmp_path, f"t{i}") for i in range(3)]
     db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "tt"),
-                            save=False, threads=2)
+                            save=False, processes=2)
     res = fastaai.search(db, db, threads=1, stdev=stdev)
 
     mine = tmp_path / f"py_{stdev}.tsv"
@@ -333,3 +333,42 @@ def test_processes_give_identical_crystals(tmp_path):
     assert [p.name for p in serial] == [p.name for p in wide]
     for a, b in zip(sorted(serial), sorted(wide)):
         assert a.read_text() == b.read_text()
+
+
+# --- unit / driver pairs ------------------------------------------------------
+
+def test_every_step_has_a_unit_and_a_driver():
+    assert hasattr(fastaai, "genome_to_protein") and hasattr(fastaai, "genomes_to_proteins")
+    assert hasattr(fastaai, "protein_to_hmm") and hasattr(fastaai, "proteins_to_hmms")
+    assert hasattr(fastaai, "all_steps") and hasattr(fastaai, "preprocess")
+
+
+def test_driver_preserves_input_order(tmp_path):
+    """`imap_unordered` yields as workers finish, so order is restored by index.
+    Callers pair inputs with outputs positionally; losing that silently would be
+    a nasty way to mislabel a genome."""
+    prots = [_protein_file(tmp_path, f"o{i}") for i in range(5)]
+    shuffled = [prots[3], prots[0], prots[4], prots[1]]
+    out = fastaai.proteins_to_hmms(shuffled, tmp_path / "hh", processes=3)
+    assert [p.stem for p in out] == [p.stem for p in shuffled]
+
+
+def test_driver_output_matches_serial(tmp_path):
+    prots = [_protein_file(tmp_path, f"m{i}") for i in range(4)]
+    one = fastaai.proteins_to_hmms(prots, tmp_path / "s", processes=1)
+    many = fastaai.proteins_to_hmms(prots, tmp_path / "p", processes=4)
+    assert [a.read_text() for a in one] == [b.read_text() for b in many]
+
+
+def test_all_steps_writes_every_rank_for_one_genome(tmp_path):
+    """The whole chain in one process, nothing returned between stages."""
+    prot = _protein_file(tmp_path, "solo")
+    root = tmp_path / "one"
+    rec = fastaai.all_steps(prot, root, input_kind="protein")
+
+    assert rec.name == "solo" and rec.error is None
+    assert (root / "proteins" / "solo.fasta").exists()
+    assert (root / "hmm_hits" / "solo.tsv").exists()
+    # The record carries counts, not sequence — that is what lets it cross a
+    # process boundary cheaply.
+    assert rec.n_proteins > 0 and rec.scps == {}
