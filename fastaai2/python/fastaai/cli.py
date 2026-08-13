@@ -40,7 +40,7 @@ from .pipeline import (
     DEFAULT_SEARCH_THREADS,
     build_from_crystals,
     crystallize_archive,
-    preprocess,
+    preprocess_paths,
 )
 from .search import DEFAULT_FILTER, MODEL_SETS, ModelSet, model_set_key
 
@@ -155,7 +155,7 @@ def _load_or_build(source, models, args, log) -> "_core.Database":
     site.sub(layout.CRYSTALS, create=True)
     log(f"  writing to {site.root}/")
 
-    records = preprocess(
+    records = preprocess_paths(
         paths, models, mode=args.filter, threads=args.preprocess_threads,
         progress=progress, archive_root=site.root, input_kind=args.input_kind,
         crystal_root=site.crystals, compress=site.compress,

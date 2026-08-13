@@ -395,21 +395,34 @@ so and gives the crystal-and-rebuild replacement.
 ```python
 import fastaai
 
-models = fastaai.ModelSet("models.hmm")
-paths  = fastaai.find_genomes("/path/to/genomes")
+# The whole thing, from whichever rank you have. Ranks combine.
+db = fastaai.preprocess(genomes="/path/to/genomes", database="firm")
+db = fastaai.preprocess(proteins=["a.faa", "b.faa"], crystals="other/crystals")
 
-# Preprocess into a run directory; every rank is written as it is produced.
-fastaai.preprocess(paths, models, threads=8,
-                   archive_root="FastAAI", crystal_root="FastAAI/crystals")
-
-# Crystals are the only route into an index. Rust parses them.
-db  = fastaai.build_from_crystals("FastAAI/crystals", models)
 res = fastaai.search(db, db, threads=8)
-
 res.jaccard   # (n, n) float64, NaN where no accession is shared
 res.shared    # (n, n) uint32, accessions carried by both genomes
 res.aai       # (n, n) float64, uncensored
 ```
+
+Or one step at a time. Each takes and returns **paths**, so a step can be run
+for a thousand genomes across a cluster and the results gathered afterwards;
+the steps are per-genome and single-threaded, and `preprocess` is what adds the
+thread pool.
+
+```python
+prot = fastaai.genome_to_protein("g.fna.gz", "FastAAI/proteins")
+hits = fastaai.protein_to_hmm(prot, "FastAAI/hmm_hits")          # --hmm set optional
+cry  = fastaai.prot_hmm_to_crystal([(prot, hits)], "FastAAI/crystals")
+
+db   = fastaai.build_database("FastAAI/crystals", save_to="FastAAI/database/firm")
+res  = fastaai.search(db, db, threads=8)
+```
+
+`prot_hmm_to_crystal` takes `(protein_path, hmm_path)` pairs and accepts either
+this package's hit tables or HMMER's own `--tblout`, so a caller who already ran
+`hmmsearch` does not have to reformat anything.
+
 
 ## Notes
 
@@ -440,7 +453,7 @@ unverifiable rather than treated as a conflict.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 226 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 235 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.

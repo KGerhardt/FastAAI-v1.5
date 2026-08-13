@@ -85,7 +85,7 @@ def preprocess_one(
         return GenomeRecord(name, {}, None, error=f"{type(exc).__name__}: {exc}")
 
 
-def preprocess(
+def preprocess_paths(
     paths: Iterable[os.PathLike | str],
     models: ModelSet,
     mode: FilterMode = DEFAULT_FILTER,
@@ -176,8 +176,22 @@ def build_from_crystals(
     paths = [str(p) for p in crystal.crystal_paths(source)]
     if not paths:
         raise ValueError(f"no crystals ({crystal.SUFFIX}) found at {source}")
+    return build_from_crystals_paths(paths, models, k, alphabet, only)
 
-    db = _core.build_from_crystals(paths, models.accessions, k, alphabet, only)
+
+def build_from_crystals_paths(
+    paths: list[str],
+    models: ModelSet,
+    k: int | None = None,
+    alphabet: str | None = None,
+    only: set | None = None,
+) -> "_core.Database":
+    """`build_from_crystals` over an explicit file list.
+
+    Separate because a caller may be combining crystals from several places —
+    which is how collections are combined, now that there is no merge.
+    """
+    db = _core.build_from_crystals(list(paths), models.accessions, k, alphabet, only)
 
     # Checked here rather than in Rust because the comparison is against a
     # ModelSet, which is a Python object. Everything below the file — parsing,

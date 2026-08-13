@@ -6,13 +6,22 @@ owns k-merisation, the inverted index, counting and the AAI transform.
 
 from . import _core
 from .ingest import find_genomes, genome_name, read_fasta
+from .api import (
+    build_database,
+    genome_to_protein,
+    preprocess,
+    prot_hmm_to_crystal,
+    protein_to_hmm,
+    read_hit_table,
+)
 from .pipeline import (
     DEFAULT_SEARCH_THREADS,
     GenomeRecord,
     SearchResult,
     build_from_crystals,
-    preprocess,
+    crystallize_archive,
     preprocess_one,
+    preprocess_paths,
     search,
 )
 from .predict import predict_proteins
@@ -49,9 +58,16 @@ __all__ = [
     "jaccard_to_aai",
     "kmerize",
     "predict_proteins",
+    "build_database",
     "build_from_crystals",
+    "crystallize_archive",
+    "genome_to_protein",
     "preprocess",
     "preprocess_one",
+    "preprocess_paths",
+    "prot_hmm_to_crystal",
+    "protein_to_hmm",
+    "read_hit_table",
     "read_fasta",
     "search",
     "__version__",
