@@ -31,7 +31,7 @@ from .pipeline import (
 from .predict import predict_proteins
 from .search import DEFAULT_FILTER, ModelSet, best_hits
 
-__version__ = "2.0.0a1"
+__version__ = "1.5.0"
 
 Database = _core.Database
 compare_pair = _core.compare_pair
