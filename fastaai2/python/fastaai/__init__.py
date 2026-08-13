@@ -17,6 +17,7 @@ from .api import (
 from .pipeline import (
     DEFAULT_SEARCH_THREADS,
     GenomeRecord,
+    Match,
     SearchResult,
     build_from_crystals,
     crystallize_archive,
@@ -46,6 +47,7 @@ __all__ = [
     "DEFAULT_K",
     "DEFAULT_SEARCH_THREADS",
     "GenomeRecord",
+    "Match",
     "MAX_PARTITION",
     "ModelSet",
     "SearchResult",

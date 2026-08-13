@@ -400,10 +400,32 @@ db = fastaai.preprocess(genomes="/path/to/genomes", database="firm")
 db = fastaai.preprocess(proteins=["a.faa", "b.faa"], crystals="other/crystals")
 
 res = fastaai.search(db, db, threads=8)
+```
+
+Reading the result. The matrices stay public, but the questions people actually
+ask have answers:
+
+```python
+res.best_hit("GCF_000007085.1")        # Match(query, target, aai, jaccard, shared)
+res.hits_for("GCF_000007085.1", k=5)   # its five nearest, best first
+res.top_hits(k=5)                      # that, for every query
+res.rows()                             # every pair, long format
+
 res.jaccard   # (n, n) float64, NaN where no accession is shared
 res.shared    # (n, n) uint32, accessions carried by both genomes
 res.aai       # (n, n) float64, uncensored
 ```
+
+A self-comparison's diagonal is a genome against itself, so it is **not** a
+neighbour: `hits_for` and `best_hit` skip it unless you pass
+`include_self=True`. Pairs sharing no marker are dropped rather than reported as
+zero — no shared marker is an absence of evidence, not evidence of distance.
+
+`res.to_tsv()` writes what the object holds, under its own column names. It is
+deliberately *not* the v1 table: that one carries `jacc_SD` and
+`poss_shared_SCPs` and applies a reporting band (a self-pair reads 100, anything
+over 90 reads `>90%`) which lives in Rust with its own tests. For the v1 table,
+let the engine write it — `fastaai query`, or `Database.write_block`.
 
 Or one step at a time. Each takes and returns **paths**, so a step can be run
 for a thousand genomes across a cluster and the results gathered afterwards;
@@ -422,6 +444,16 @@ res  = fastaai.search(db, db, threads=8)
 `prot_hmm_to_crystal` takes `(protein_path, hmm_path)` pairs and accepts either
 this package's hit tables or HMMER's own `--tblout`, so a caller who already ran
 `hmmsearch` does not have to reformat anything.
+
+Every function that needs models takes the same `models=` spec `--hmm` takes:
+omit it for the bundled 122 SCPs, name a packaged set (`"gtdb-bact"`,
+`"gtdb-arch"`, `"gtdb-all"`, case and underscores interchangeable), or give a
+path to any HMM file. A `ModelSet` you already built passes straight through.
+
+```python
+fastaai.preprocess(genomes="g/", models="gtdb-bact")
+fastaai.protein_to_hmm(prot, "FastAAI/hmm_hits", models="my_markers.hmm")
+```
 
 
 ## Notes
@@ -453,7 +485,7 @@ unverifiable rather than treated as a conflict.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 235 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 246 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.

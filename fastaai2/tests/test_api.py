@@ -128,3 +128,81 @@ def test_preprocess_combines_ranks(tmp_path):
         proteins=b, crystals=str(first / "crystals"),
         directory=str(tmp_path / "both"), save=False, threads=1)
     assert combined.n_genomes == 2, combined.genome_names
+
+
+# --- reading a result ---------------------------------------------------------
+
+def _tiny_result(tmp_path):
+    prots = [_protein_file(tmp_path, f"r{i}") for i in range(3)]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "res"),
+                            save=False, threads=2)
+    return db, fastaai.search(db, db, threads=1)
+
+
+def test_self_pair_is_not_a_neighbour(tmp_path):
+    """The diagonal of a self-comparison is the genome against itself. Reporting
+    it as the closest relative is the mistake this interface exists to stop."""
+    db, res = _tiny_result(tmp_path)
+    q = res.query_names[0]
+    assert all(m.target != q for m in res.hits_for(q))
+    assert res.hits_for(q, include_self=True)[0].target == q
+
+
+def test_hits_are_ordered_best_first(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    for q in res.query_names:
+        aai = [m.aai for m in res.hits_for(q)]
+        assert aai == sorted(aai, reverse=True)
+
+
+def test_best_hit_agrees_with_hits_for(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    for q in res.query_names:
+        top = res.hits_for(q, k=1)
+        assert res.best_hit(q) == (top[0] if top else None)
+
+
+def test_k_and_min_aai_bound_the_list(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    q = res.query_names[0]
+    assert len(res.hits_for(q, k=1)) <= 1
+    assert all(m.aai >= 1e9 for m in res.hits_for(q, min_aai=1e9)) or \
+        res.hits_for(q, min_aai=1e9) == []
+
+
+def test_unknown_query_is_a_keyerror(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    with pytest.raises(KeyError):
+        res.hits_for("not_a_genome")
+
+
+def test_rows_covers_the_matrix(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    n = len(res.query_names) * len(res.target_names)
+    assert sum(1 for _ in res.rows()) == n
+
+
+def test_to_tsv_does_not_claim_to_be_the_v1_table(tmp_path):
+    """It has its own column names on purpose — the v1 table carries two more
+    columns and a reporting band that lives in Rust."""
+    db, res = _tiny_result(tmp_path)
+    out = tmp_path / "r.tsv"
+    res.to_tsv(out)
+    header = out.read_text().splitlines()[0]
+    assert header == "query\ttarget\tjaccard\tshared\taai"
+    assert "avg_jacc_sim" not in header and "poss_shared_SCPs" not in header
+
+
+@pytest.mark.parametrize("spec", [None, "gtdb-bact", "GTDB_ARCH"])
+def test_model_spec_forms_are_accepted_everywhere(spec, tmp_path):
+    """--hmm's spellings work in the API too: the default, a packaged set by
+    name, or a path."""
+    from fastaai.api import _models
+    assert len(_models(spec)) > 0
+
+
+def test_model_spec_accepts_a_path_and_a_modelset():
+    from fastaai.api import _models
+    default = _models(None)
+    assert len(_models(default.path)) == len(default)
+    assert _models(default) is default

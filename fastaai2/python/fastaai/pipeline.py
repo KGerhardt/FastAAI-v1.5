@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Callable, Iterable, NamedTuple
 
 import numpy as np
 
@@ -259,6 +259,20 @@ def crystallize_archive(root, out, models: ModelSet,
     return n
 
 
+class Match(NamedTuple):
+    """One pair, as a caller reads it.
+
+    Distinct from `search.Hit`, which is a protein against a model. This is a
+    genome against a genome, and the fields are the ones the TSV reports.
+    """
+
+    query: str
+    target: str
+    aai: float
+    jaccard: float
+    shared: int
+
+
 @dataclass
 class SearchResult:
     query_names: list[str]
@@ -281,6 +295,103 @@ class SearchResult:
         x = np.power(-0.2607023 * np.log(j), 1.0 / 3.435)
         out[ok] = (1.810741 * np.exp(-x) - 0.3087057) * 100.0
         return out
+
+    # --- reading the result ---------------------------------------------------
+    #
+    # The matrices are the honest representation and stay public, but almost
+    # every caller wants one of three things: the neighbours of a genome, the
+    # best hit for each genome, or a table. Without these each of them writes
+    # the same index-juggling, and the self-pair is the part they get wrong —
+    # in a self-comparison the diagonal is the genome against itself at 100,
+    # which is not a neighbour.
+
+    def _self_pair(self, qi: int, ti: int) -> bool:
+        return self.query_names[qi] == self.target_names[ti]
+
+    def hits_for(self, query: str, *, k: int | None = None,
+                 min_aai: float | None = None,
+                 include_self: bool = False) -> list["Match"]:
+        """Neighbours of one genome, best first.
+
+        Pairs sharing no marker are dropped rather than reported as zero: no
+        shared marker is an absence of evidence, not evidence of distance.
+        """
+        try:
+            qi = self.query_names.index(query)
+        except ValueError:
+            raise KeyError(f"{query!r} is not a query in this result") from None
+
+        aai = self.aai[qi]
+        jac = self.jaccard[qi]
+        shared = np.asarray(self.shared)[qi]
+
+        order = np.argsort(-np.nan_to_num(aai, nan=-np.inf))
+        out: list[Match] = []
+        for ti in order:
+            if not np.isfinite(aai[ti]):
+                continue
+            if not include_self and self._self_pair(qi, int(ti)):
+                continue
+            if min_aai is not None and aai[ti] < min_aai:
+                break
+            out.append(Match(query, self.target_names[ti], float(aai[ti]),
+                             float(jac[ti]), int(shared[ti])))
+            if k is not None and len(out) >= k:
+                break
+        return out
+
+    def top_hits(self, k: int = 5, *, min_aai: float | None = None,
+                 include_self: bool = False) -> dict[str, list["Match"]]:
+        """`hits_for` over every query. The candidate-reduction shape."""
+        return {q: self.hits_for(q, k=k, min_aai=min_aai,
+                                 include_self=include_self)
+                for q in self.query_names}
+
+    def best_hit(self, query: str, *, include_self: bool = False) -> "Match | None":
+        """The single closest genome, or None if this query shares no marker
+        with anything."""
+        got = self.hits_for(query, k=1, include_self=include_self)
+        return got[0] if got else None
+
+    def best_hits(self, *, include_self: bool = False) -> dict[str, "Match | None"]:
+        return {q: self.best_hit(q, include_self=include_self)
+                for q in self.query_names}
+
+    def rows(self, *, include_self: bool = True):
+        """Every pair, long format — the TSV's rows as objects."""
+        aai, jac = self.aai, self.jaccard
+        shared = np.asarray(self.shared)
+        for qi, q in enumerate(self.query_names):
+            for ti, t in enumerate(self.target_names):
+                if not include_self and self._self_pair(qi, ti):
+                    continue
+                yield Match(q, t, float(aai[qi, ti]), float(jac[qi, ti]),
+                            int(shared[qi, ti]))
+
+    def to_tsv(self, path, *, include_self: bool = True) -> "os.PathLike | str":
+        """Write these values as a table. **This is not FastAAI 1's TSV.**
+
+        It is the numbers this object holds, with its own column names to make
+        the difference visible. The v1-compatible table has two columns that are
+        not here — `jacc_SD` and `poss_shared_SCPs` — and applies a reporting
+        band that reports a self-pair as 100 and anything above 90 as `>90%`.
+        That band and its rounding live in Rust (`report.rs`) with their own
+        tests, so reproducing them here would be a second implementation to keep
+        in step, and the numbers would drift the first time one changed.
+
+        For the v1 table, let the engine write it: `fastaai query`, or
+        `Database.write_block`, which is what the CLI calls.
+
+        `aai` here is the uncensored fit, so a self-pair reads as its
+        extrapolated value rather than 100.
+        """
+        with open(path, "w") as fh:
+            fh.write("query\ttarget\tjaccard\tshared\taai\n")
+            for h in self.rows(include_self=include_self):
+                j = "" if not np.isfinite(h.jaccard) else f"{h.jaccard:.6f}"
+                a = "" if not np.isfinite(h.aai) else f"{h.aai:.4f}"
+                fh.write(f"{h.query}\t{h.target}\t{j}\t{h.shared}\t{a}\n")
+        return path
 
 
 #: Query-blocking width. The accumulator is `block * n_target`; 128 keeps it in
