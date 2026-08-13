@@ -4,11 +4,14 @@ Three verbs replace FastAAI 1's seven modules:
 
     fastaai build   inputs -> a database
     fastaai query   database x database -> AAI
-    fastaai merge   databases -> one database
 
 plus one that computes nothing and only moves data between preprocessing ranks:
 
-    fastaai crystallize   archive -> crystals
+    fastaai crystallize   proteins + hits -> crystals
+
+There is no merge. Combining sealed databases preserved each donor's
+partitioning, which fragments the index; putting crystals together and
+rebuilding repacks it instead.
 
 That is not a reduction in capability. Query and target databases are the same
 format and the k-mer join reads both sides as inverted indexes, so v1's modules
@@ -35,8 +38,6 @@ from .ingest import find_genomes
 from .pipeline import (
     DEFAULT_BLOCK,
     DEFAULT_SEARCH_THREADS,
-    build_database,
-    build_from_archive,
     build_from_crystals,
     crystallize_archive,
     preprocess,
@@ -108,8 +109,15 @@ def _load_or_build(source, models, args, log) -> "_core.Database":
         db.source = str(p)
         return db
     if archive_module.looks_like_archive(p):
-        db = build_from_archive(p, mode=args.filter)
-        log(f"  rebuilt {p} from stored proteins and hits: {db.n_genomes} genomes")
+        # Stored proteins and hits are an earlier rank, not a second way to
+        # build. Resolve them into crystals beside themselves, then build from
+        # those — one route into an index, and the crystals stay.
+        dest = p / layout.CRYSTALS
+        n = crystallize_archive(p, dest, models if models is not None else ModelSet(),
+                                mode=args.filter, compress=args.compress)
+        log(f"  resolved {n} crystals from stored proteins and hits into {dest}/")
+        db = build_from_crystals(dest, models if models is not None else ModelSet())
+        log(f"  built {db.n_genomes} genomes")
         db.filter_mode = args.filter
         db.source = str(p)
         return db
@@ -304,10 +312,6 @@ def build_parser() -> argparse.ArgumentParser:
                    help="best-hit resolution to bake into the crystals")
     c.add_argument("--quiet", action="store_true")
 
-    m = sub.add_parser("merge", help="merge databases into one")
-    m.add_argument("-o", "--output", required=True, help="output database directory")
-    m.add_argument("inputs", nargs="+", help="databases to merge")
-    m.add_argument("--quiet", action="store_true")
     return p
 
 
@@ -407,16 +411,6 @@ def cmd_crystallize(args) -> int:
     return 0
 
 
-def cmd_merge(args) -> int:
-    log = _log(args.quiet)
-    written, skipped, parts = _core.merge_databases(args.output, args.inputs)
-    log(f"merged {len(args.inputs)} databases -> {args.output}")
-    log(f"  {written} genomes, {parts} partitions, {skipped} duplicates skipped")
-    log("  no posting list was read or renumbered; ordinals were reassigned, so any "
-        "stored result matrix keyed to the old order is invalidated")
-    return 0
-
-
 def _reroute(argv: list[str]) -> list[str]:
     """Translate a FastAAI 1 command line into the new surface."""
     module, rest = argv[0], argv[1:]
@@ -502,20 +496,22 @@ def _reroute(argv: list[str]) -> list[str]:
         return ["query"] + pair("-q", qi) + pair("-t", ti) + pair("-o", out) \
             + k + carried()
     if module == "merge_db":
-        donors = [rest[i + 1] for i, a in enumerate(rest) if a in ("-d", "--donors")]
-        # v1 also took a file listing donors. Dropping it silently merged
-        # nothing and reported success.
-        donor_file = opt("--donor_file")
-        if donor_file:
-            try:
-                with open(donor_file) as fh:
-                    donors += [ln.strip() for ln in fh if ln.strip()]
-            except OSError as e:
-                raise SystemExit(f"--donor_file {donor_file}: {e}") from None
-        recipient = opt("-r", "--recipient")
-        if not donors:
-            raise SystemExit("merge_db: no donor databases given (-d or --donor_file)")
-        return ["merge", "-o", recipient, recipient] + donors
+        # Merging sealed databases is gone. It preserved each donor's
+        # partitioning, which is the fragmentation trap: merging N one-genome
+        # databases produced N one-genome partitions and cost ~90x search
+        # throughput. Rebuilding from crystals repacks instead, so the
+        # replacement is strictly better — but it is not a flag translation,
+        # and silently doing something else would be worse than saying so.
+        raise SystemExit(
+            "merge_db is not supported: FastAAI 2 does not merge sealed "
+            "databases.\n"
+            "Merging kept each donor's partitioning, which fragments the index "
+            "and costs search throughput.\n"
+            "Put the crystals together and rebuild instead — the result is one "
+            "cleanly partitioned database:\n"
+            "  cp a/crystals/*.crystal.fasta b/crystals/*.crystal.fasta all/\n"
+            "  fastaai build all/ -d combined"
+        )
 
     raise SystemExit(f"unknown module {module!r}")
 
@@ -537,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
     for flag, why in RETIRED.items():
         if getattr(args, flag, False) and not quiet:
             print(f"note: --{flag} no longer applies — {why}", file=sys.stderr)
-    return {"build": cmd_build, "query": cmd_query, "merge": cmd_merge,
+    return {"build": cmd_build, "query": cmd_query,
             "crystallize": cmd_crystallize}[args.command](args)
 
 

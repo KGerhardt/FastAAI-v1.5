@@ -10,6 +10,7 @@
 //! mature pure-Rust HMMER, so it would FFI back to the same C library.
 
 pub mod aai;
+pub mod crystal;
 pub mod index;
 pub mod kernel;
 pub mod kmer;
@@ -1003,86 +1004,6 @@ fn open_database(path: &str) -> PyResult<Database> {
     })
 }
 
-/// Merge databases into `output`.
-///
-/// Cheap by construction: local genome IDs reference nothing outside their own
-/// partition, so merging copies partition files and rewrites the manifest.
-/// **No posting list is read, renumbered or rewritten.** Cost scales with the
-/// number of genomes, not with the size of the databases.
-///
-/// Genomes already present — same content hash *and* name — are skipped rather
-/// than duplicated. Ordinals are reassigned across the merged set, which
-/// invalidates any stored result matrix keyed to the old order.
-///
-/// Returns `(genomes_written, duplicates_skipped, partitions)`.
-#[pyfunction]
-fn merge_databases(output: &str, inputs: Vec<String>) -> PyResult<(usize, usize, usize)> {
-    if inputs.is_empty() {
-        return Err(PyValueError::new_err("no input databases"));
-    }
-    let out = std::path::Path::new(output);
-
-    let first = store::read_schema(std::path::Path::new(&inputs[0])).map_err(to_py)?;
-    let mut manifest: Vec<ManifestEntry> = Vec::new();
-    let mut seen: std::collections::HashSet<(u64, String)> = std::collections::HashSet::new();
-    let mut skipped = 0usize;
-    let mut next_partition = 0usize;
-
-    std::fs::create_dir_all(out).map_err(to_py)?;
-
-    for path in &inputs {
-        let dir = std::path::Path::new(path);
-        let schema = store::read_schema(dir).map_err(to_py)?;
-        first.compatible_with(&schema).map_err(|e| {
-            PyValueError::new_err(format!("{path}: incompatible with {}: {e}", inputs[0]))
-        })?;
-
-        let entries = store::read_manifest(dir).map_err(to_py)?;
-        let parts = store::partition_paths(dir).map_err(to_py)?;
-
-        // Which of this donor's partitions survive, and where they land.
-        let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-        let mut kept: Vec<ManifestEntry> = Vec::new();
-        for e in entries {
-            if !seen.insert((e.content_hash, e.name.clone())) {
-                skipped += 1;
-                continue;
-            }
-            kept.push(e);
-        }
-        for e in &kept {
-            if !remap.contains_key(&e.partition) {
-                let dest = next_partition;
-                next_partition += 1;
-                remap.insert(e.partition, dest as u32);
-                let src = parts.get(e.partition as usize).ok_or_else(|| {
-                    PyRuntimeError::new_err(format!(
-                        "{path}: manifest references partition {} but only {} exist",
-                        e.partition, parts.len()
-                    ))
-                })?;
-                std::fs::copy(src, out.join(store::partition_file(dest))).map_err(to_py)?;
-            }
-        }
-        for mut e in kept {
-            e.partition = remap[&e.partition];
-            e.ordinal = manifest.len() as u32;
-            manifest.push(e);
-        }
-    }
-
-    if manifest.is_empty() {
-        return Err(PyRuntimeError::new_err("merge produced no genomes"));
-    }
-
-    let mut schema = first;
-    schema.source = format!("merge of {} database(s)", inputs.len());
-    store::write_schema(out, &schema).map_err(to_py)?;
-    store::write_manifest(out, &manifest).map_err(to_py)?;
-    Ok((manifest.len(), skipped, next_partition))
-}
-
-/// Jaccard to AAI percentage. NaN in, NaN out; uncensored by design.
 #[pyfunction]
 fn jaccard_to_aai(kaai: f64) -> f64 {
     aai::kaai_to_aai(kaai)
@@ -1142,6 +1063,79 @@ fn kmerize(seq: &[u8], k: usize, alphabet: &str) -> PyResult<Vec<u32>> {
     Ok(Kmerizer::new(alpha).kmers(seq))
 }
 
+/// Build a sealed database by reading crystals directly.
+///
+/// The whole path from file to inverted index stays on this side: needletail
+/// parses, the sequence is k-merised and dropped, and no sequence ever becomes
+/// a Python object. Files are read one at a time, so peak memory is one crystal
+/// rather than the collection.
+///
+/// *accessions* is the ordered model list and is the sole source of accession
+/// IDs. Deriving them from whichever accessions appeared in the crystals would
+/// make the schema depend on which genomes were included, so two subsets of one
+/// collection would number their shared markers differently and refuse to be
+/// compared.
+///
+/// A genome may not span files: reassembling it would mean holding everything,
+/// which is the property this function exists to avoid, so it is refused rather
+/// than silently added twice.
+#[pyfunction]
+#[pyo3(signature = (paths, accessions, k=None, alphabet=None, only=None))]
+fn build_from_crystals(
+    paths: Vec<String>,
+    accessions: Vec<String>,
+    k: Option<usize>,
+    alphabet: Option<String>,
+    only: Option<std::collections::HashSet<String>>,
+) -> PyResult<Database> {
+    let k = k.unwrap_or(kmer::DEFAULT_K);
+    let alphabet = alphabet.unwrap_or_else(|| kmer::DEFAULT_ALPHABET.to_string());
+    let mut db = Database::new(accessions.clone(), k, &alphabet)?;
+
+    let acc_index: std::collections::HashMap<String, usize> = accessions
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.clone(), i))
+        .collect();
+
+    let mut prov = crystal::Provenance::default();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for path in &paths {
+        let genomes = crystal::read_file(std::path::Path::new(path), &acc_index, &mut prov)
+            .map_err(PyValueError::new_err)?;
+        for g in genomes {
+            if !seen.insert(g.name.clone()) {
+                return Err(PyValueError::new_err(format!(
+                    "{path}: genome {:?} also appears in an earlier file. \
+                     Crystals for one genome must be in one file.",
+                    g.name
+                )));
+            }
+            if let Some(keep) = &only {
+                if !keep.contains(&g.name) {
+                    continue;
+                }
+            }
+            if g.records.is_empty() {
+                continue;
+            }
+            db.add_genome(&g.name, g.records)?;
+        }
+    }
+
+    if db.names.is_empty() {
+        return Err(PyRuntimeError::new_err("no crystal yielded a usable SCP set"));
+    }
+    db.seal()?;
+    db.models = prov.models_one();
+    let f = prov.filter_one();
+    if !f.is_empty() {
+        db.filter_mode = f;
+    }
+    Ok(db)
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Database>()?;
@@ -1150,7 +1144,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(kmerize, m)?)?;
     m.add_function(wrap_pyfunction!(compare_pair, m)?)?;
     m.add_function(wrap_pyfunction!(open_database, m)?)?;
-    m.add_function(wrap_pyfunction!(merge_databases, m)?)?;
+    m.add_function(wrap_pyfunction!(build_from_crystals, m)?)?;
     m.add("DEFAULT_ALPHABET", kmer::DEFAULT_ALPHABET)?;
     m.add("DEFAULT_K", kmer::DEFAULT_K)?;
     m.add("MAX_PARTITION", index::MAX_PARTITION)?;

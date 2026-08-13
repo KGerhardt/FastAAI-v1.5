@@ -107,9 +107,9 @@ def preprocess(
     **With *crystal_root*, each worker writes its own crystal and the returned
     records come back with `scps` cleared.** That is the point of it: the SCPs
     are on disk, so nothing needs to hold every genome's sequences until the
-    build, and peak memory stops depending on how many genomes there are. Build
-    from the crystal directory (`build_from_crystals`) rather than from these
-    records — `build_database` would find nothing in them.
+    build, and peak memory stops depending on how many genomes there are.
+    Build from the crystal directory with `build_from_crystals`; the records are
+    metadata for reporting, not a second copy of the data.
     """
     paths = list(paths)
     out: list[GenomeRecord | None] = [None] * len(paths)
@@ -145,189 +145,104 @@ def preprocess(
     return [r for r in out if r is not None]
 
 
-def build_from_archive(
-    root,
-    mode: FilterMode = DEFAULT_FILTER,
-    only: set | None = None,
-    k: int | None = None,
-    alphabet: str | None = None,
-) -> "_core.Database":
-    """Rebuild a sealed database from an archive, with no prediction or search.
-
-    Re-resolving under a different *mode* costs nothing, because the raw hits were
-    stored rather than only the surviving SCPs.
-
-    *only* restricts to a set of genome names. *k* and *alphabet* override the
-    defaults — needed to reproduce FastAAI 1 exactly, which included the stop
-    codon `*` in its 21-symbol alphabet (see equivalence harness).
-    """
-    from .archive import (genome_names, read_fingerprint, read_hits, read_models,
-                          read_proteins)
-
-    accessions = read_models(root)
-    acc_index = {a: i for i, a in enumerate(accessions)}
-    order = {g: i for i, g in enumerate(genome_names(root))}
-
-    resolved: dict[str, list[tuple[int, bytes]]] = {}
-    for genome, hits in read_hits(root):
-        if only is not None and genome not in only:
-            continue
-        assignment = resolve_hits(hits, mode)
-        if not assignment:
-            continue
-        proteins = read_proteins(root, genome)
-        payload = [
-            (acc_index[acc], proteins[prot].encode())
-            for prot, acc in assignment.items()
-            if acc in acc_index and prot in proteins
-        ]
-        if payload:
-            resolved[genome] = payload
-
-    db = _core.Database(
-        accessions,
-        k if k is not None else _core.DEFAULT_K,
-        alphabet if alphabet is not None else _core.DEFAULT_ALPHABET,
-    )
-    for genome in sorted(resolved, key=lambda g: order.get(g, 1 << 30)):
-        db.add_genome(genome, resolved[genome])
-    db.seal()
-    # Carried through so a rebuild is as verifiable as the original build. An
-    # archive written before fingerprints existed yields "", meaning unknown.
-    db.models = read_fingerprint(root)
-    return db
-
-
 def build_from_crystals(
     source,
     models: ModelSet,
     k: int | None = None,
     alphabet: str | None = None,
+    only: set | None = None,
 ) -> "_core.Database":
-    """Build a sealed database from crystals — no prediction, no HMM search.
+    """Build a sealed database from crystals — the only route into an index.
+
+    Parsing happens in Rust: needletail reads each file, the sequence is
+    k-merised and dropped, and no sequence becomes a Python object. Files are
+    read one at a time, so peak memory is one crystal rather than the
+    collection.
+
+    *only* restricts to a set of genome names — the programmatic form of copying
+    a subset of the files. *k* and *alphabet* override the defaults, which is
+    what reproducing FastAAI 1 needs: it included the stop codon `*` in a
+    21-symbol alphabet.
 
     **Accession order comes from *models*, never from the crystals.** Accession
     IDs are positions in a list, so deriving that list from whichever accessions
-    happen to appear would make the schema depend on which genomes were included:
-    two subsets of one collection would number their shared markers differently
-    and refuse to be compared. Taking the order from the model set means any
-    subset builds a database comparable with any other.
-
-    The crystals' recorded fingerprint must match *models* for the same reason
-    the engine checks it anywhere else — mismatched marker sets produce
-    well-formed, meaningless AAI.
+    happen to appear would make the schema depend on which genomes were
+    included: two subsets of one collection would number their shared markers
+    differently and refuse to be compared. Taking the order from the model set
+    means any subset builds a database comparable with any other.
     """
     from . import crystal
 
-    acc_index = {a: i for i, a in enumerate(models.accessions)}
-    db = _core.Database(
-        models.accessions,
-        k if k is not None else _core.DEFAULT_K,
-        alphabet if alphabet is not None else _core.DEFAULT_ALPHABET,
-    )
+    paths = [str(p) for p in crystal.crystal_paths(source)]
+    if not paths:
+        raise ValueError(f"no crystals ({crystal.SUFFIX}) found at {source}")
 
-    prov = None
-    checked = False
-    n = 0
-    # Streamed, so peak memory is one crystal file rather than the collection.
-    for genome, scps, prov in crystal.iter_genomes(source):
-        if not checked:
-            # The fingerprint is uniform across a run — `iter_genomes` raises on
-            # any disagreement — so it only needs testing against the model set
-            # once, on the first genome that carries one.
-            stored = prov.as_dict()["models"]
-            if stored and stored != models.fingerprint:
-                raise ValueError(
-                    "these crystals were not built with this model set\n"
-                    f"  crystals:  {stored}\n"
-                    f"  model set: {models.fingerprint}\n"
-                    "Pass --hmm naming the models the crystals were made with."
-                )
-            checked = bool(stored)
-        unknown = set(scps) - set(acc_index)
-        if unknown:
-            raise ValueError(
-                f"crystals reference {len(unknown)} accession(s) absent from the "
-                f"model set, e.g. {sorted(unknown)[:3]}"
-            )
-        payload = [(acc_index[a], seq.encode()) for a, seq in sorted(scps.items())]
-        if payload:
-            db.add_genome(genome, payload)
-            n += 1
+    db = _core.build_from_crystals(paths, models.accessions, k, alphabet, only)
 
-    if not n:
-        raise RuntimeError(f"no genome in {source} yielded a usable SCP set")
-    db.seal()
-    fields = prov.as_dict() if prov is not None else {}
-    db.models = fields.get("models") or models.fingerprint
-    if fields.get("filter"):
-        db.filter_mode = fields["filter"]
+    # Checked here rather than in Rust because the comparison is against a
+    # ModelSet, which is a Python object. Everything below the file — parsing,
+    # k-merisation, the index — never crosses back.
+    if db.models and db.models != models.fingerprint:
+        raise ValueError(
+            "these crystals were not built with this model set\n"
+            f"  crystals:  {db.models}\n"
+            f"  model set: {models.fingerprint}\n"
+            "Pass --hmm naming the models the crystals were made with."
+        )
+    if not db.models:
+        db.models = models.fingerprint
     return db
 
 
 def crystallize_archive(root, out, models: ModelSet,
                         mode: FilterMode = DEFAULT_FILTER,
                         compress: bool = False) -> int:
-    """Emit crystals from an existing archive, without re-running anything.
+    """Turn stored proteins and hits into crystals — the one operator between
+    those ranks.
 
-    The archive already holds proteins and raw hits, so this is a resolve and a
-    write — the point being that a collection preprocessed before crystals
-    existed does not have to be preprocessed again.
+    Everything expensive already happened, so this is a resolve and a write:
+    read the hits, take the best-hit assignment, stream the protein FASTA once
+    and keep only the sequences that won an accession. Nothing is predicted and
+    nothing is searched.
+
+    Streamed with `pyfastx.Fastx`, which is the sequential reader — `Fasta`
+    builds an index and can leave `.fxi` sidecars beside read-only data. Only
+    the winning proteins are retained, so a genome costs its SCPs rather than
+    its whole proteome; the previous version read every protein into a dict
+    first.
     """
-    from . import crystal
-    from .archive import read_fingerprint, read_hits, read_proteins
+    import pyfastx
+
+    from . import crystal, layout
+    from .archive import genome_names, read_fingerprint, read_hits_for
 
     fingerprint = read_fingerprint(root) or models.fingerprint
+    prot_dir = os.path.join(os.fspath(root), layout.PROTEINS)
     n = 0
-    for genome, hits in read_hits(root):
-        assignment = resolve_hits(hits, mode)
+
+    # Driven by the hit files, which carry each genome's true name. Deriving it
+    # from a filename would silently rename any genome `layout.safe` rewrote.
+    for genome in genome_names(root):
+        path = layout.find(prot_dir, layout.safe(genome), layout.FASTA_EXT)
+        if path is None:
+            continue
+        assignment = resolve_hits(read_hits_for(root, genome), mode)
         if not assignment:
             continue
-        proteins = read_proteins(root, genome)
-        scps = {acc: proteins[prot] for prot, acc in assignment.items()
-                if prot in proteins}
-        origins = {acc: prot for prot, acc in assignment.items()
-                   if prot in proteins}
+        wanted = set(assignment)
+
+        scps: dict[str, str] = {}
+        origins: dict[str, str] = {}
+        for name, seq in pyfastx.Fastx(str(path)):
+            if name in wanted:
+                acc = assignment[name]
+                scps[acc] = seq
+                origins[acc] = name
+
         if crystal.write(out, genome, scps, fingerprint, mode, None, origins,
                          compress):
             n += 1
     return n
-
-
-def build_database(
-    records: Iterable[GenomeRecord],
-    models: ModelSet,
-    filter_mode: FilterMode = DEFAULT_FILTER,
-) -> tuple["_core.Database", list[GenomeRecord]]:
-    """K-merise and seal. Genomes with no SCPs are excluded and returned separately."""
-    db = _core.Database(models.accessions)
-    # Records which models these k-mers came from, so a later comparison can
-    # verify it rather than trust matching accession names.
-    db.models = models.fingerprint
-    kept: list[GenomeRecord] = []
-    skipped: list[GenomeRecord] = []
-    for rec in records:
-        if not rec.scps:
-            skipped.append(rec)
-            continue
-        payload = [
-            (models.acc_index[acc], seq.encode())
-            for acc, seq in rec.scps.items()
-            if acc in models.acc_index
-        ]
-        if not payload:
-            skipped.append(rec)
-            continue
-        db.add_genome(rec.name, payload)
-        kept.append(rec)
-    if not kept:
-        raise RuntimeError(
-            "no genome yielded a usable SCP set. If these records came from "
-            "`preprocess(crystal_root=...)` their SCPs are on disk by design — "
-            "build from the crystal directory with `build_from_crystals`."
-        )
-    db.seal()
-    return db, skipped
 
 
 @dataclass

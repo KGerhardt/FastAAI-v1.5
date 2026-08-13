@@ -66,12 +66,6 @@ def test_single_query_maps_both_sides():
     assert got == ["query", "-q", "/q.fna", "-t", "/t.fna", "-o", "/o"]
 
 
-def test_merge_db_keeps_the_recipient_in_the_merge():
-    got = _reroute(["merge_db", "-r", "/recip", "-d", "/donor"])
-    assert got[0] == "merge"
-    assert got.count("/recip") == 2, "recipient is both destination and an input"
-    assert "/donor" in got
-
 
 def test_hmm_table_input_is_refused_not_ignored():
     """v1 accepted precomputed HMMER tables. Silently ignoring -m would search
@@ -118,53 +112,6 @@ def test_retired_flags_are_reported(tmp_path, capsys):
 
 # --------------------------------------------------------------------- merge
 
-def test_merge_combines_distinct_databases(tmp_path):
-    a, _ = _db(tmp_path, "a", n=3, start=0)
-    b, _ = _db(tmp_path, "b", n=3, start=100)
-    out = str(tmp_path / "m")
-    written, skipped, parts = _core.merge_databases(out, [a, b])
-    assert (written, skipped) == (6, 0)
-    m = _core.open_database(out)
-    assert m.n_genomes == 6
-    assert sorted(m.genome_names) == sorted([f"g{i}" for i in [0, 1, 2, 100, 101, 102]])
-
-
-def test_merge_deduplicates_by_content(tmp_path):
-    a, _ = _db(tmp_path, "a", n=3)
-    out = str(tmp_path / "m")
-    written, skipped, _ = _core.merge_databases(out, [a, a])
-    assert (written, skipped) == (3, 3), "same genomes twice must not double"
-
-
-def test_merge_preserves_results(tmp_path):
-    a, dba = _db(tmp_path, "a", n=3, start=0)
-    b, _ = _db(tmp_path, "b", n=3, start=100)
-    out = str(tmp_path / "m")
-    _core.merge_databases(out, [a, b])
-    m = _core.open_database(out)
-
-    ra = fastaai.search(dba, dba, threads=1)
-    rm = fastaai.search(m, m, threads=1)
-    idx = {n: i for i, n in enumerate(m.genome_names)}
-    for i, q in enumerate(dba.genome_names):
-        for j, t in enumerate(dba.genome_names):
-            assert np.isclose(rm.jaccard[idx[q], idx[t]], ra.jaccard[i, j], equal_nan=True)
-
-
-def test_merge_refuses_incompatible_schemas(tmp_path):
-    a, _ = _db(tmp_path, "a")
-    other = fastaai.Database(["different0", "different1"])
-    other.add_genome("x", [(0, b"MKVLAATTGG")])
-    other.seal()
-    b = str(tmp_path / "b")
-    other.save(b)
-    with pytest.raises(ValueError, match="accession"):
-        _core.merge_databases(str(tmp_path / "m"), [a, b])
-
-
-def test_merge_needs_inputs(tmp_path):
-    with pytest.raises(ValueError):
-        _core.merge_databases(str(tmp_path / "m"), [])
 
 
 # ------------------------------------------------------------------- output
@@ -191,11 +138,13 @@ def test_query_without_target_is_a_self_comparison(tmp_path):
 
 
 def test_parser_exposes_the_expected_verbs():
-    """Three search verbs, plus `crystallize`, which moves data between the
-    preprocessing ranks rather than computing anything."""
+    """Two search verbs, plus `crystallize`, which moves data between the
+    preprocessing ranks rather than computing anything. There is no merge:
+    combining sealed databases kept each donor's partitioning, so the
+    replacement is to put crystals together and rebuild."""
     p = build_parser()
     sub = [a for a in p._actions if a.dest == "command"][0]
-    assert set(sub.choices) == {"build", "query", "merge", "crystallize"}
+    assert set(sub.choices) == {"build", "query", "crystallize"}
 
 
 # --- AAI reporting band -------------------------------------------------------
@@ -272,21 +221,6 @@ def test_a_v1_self_query_without_target_still_runs(tmp_path):
     assert (tmp_path / "out.tsv").is_file()
 
 
-def test_donor_file_is_read_not_dropped(tmp_path):
-    """v1 took a file listing donors. Dropping it merged nothing, silently."""
-    a, _ = _db(tmp_path, "a", n=3, start=0)
-    b, _ = _db(tmp_path, "b", n=3, start=100)
-    listing = tmp_path / "donors.txt"
-    listing.write_text(f"{a}\n{b}\n")
-    got = _reroute(["merge_db", "-r", a, "--donor_file", str(listing)])
-    assert a in got and b in got
-
-
-def test_merge_without_donors_is_an_error(tmp_path):
-    a, _ = _db(tmp_path, "a")
-    with pytest.raises(SystemExit, match="donor"):
-        _reroute(["merge_db", "-r", a])
-
 
 @pytest.mark.parametrize("flag", ["--create_query_db", "--query_db_name",
                                   "--query_output", "--target_output"])
@@ -321,3 +255,16 @@ def test_build_works_without_an_hmm_flag(tmp_path):
     assert len(db.accession_names) == 122, "the bundled set defines the accessions"
     assert db.models == ModelSet().fingerprint, "records which models built it"
     assert db.n_genomes == 1
+
+
+def test_merge_db_says_what_to_do_instead():
+    """A retired v1 module must explain the replacement, not vanish.
+
+    Merging preserved each donor's partitioning, which is the fragmentation
+    trap — merging N one-genome databases produced N one-genome partitions.
+    """
+    with pytest.raises(SystemExit) as e:
+        _reroute(["merge_db", "-r", "/recip", "-d", "/donor"])
+    msg = str(e.value)
+    assert "not supported" in msg
+    assert "crystals" in msg and "fastaai build" in msg

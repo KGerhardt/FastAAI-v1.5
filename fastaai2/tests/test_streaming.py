@@ -344,16 +344,6 @@ def test_saving_a_streamed_database_onto_itself_is_not_destructive(tmp_path):
     assert fastaai.open_database(str(p)).n_genomes == 20
 
 
-def test_merge_spans_partitions(tmp_path, multipart):
-    other = tmp_path / "other"
-    _db(100, start=99_000).save(str(other))
-    out = tmp_path / "merged"
-    written, _skipped, parts = fastaai.merge_databases(str(out), [multipart, str(other)])
-    assert written == 16_600
-    merged = fastaai.open_database(str(out))
-    assert merged.n_genomes == 16_600
-    assert merged.n_partitions == parts
-
 
 def test_a_block_outside_the_grid_is_refused(tmp_path):
     p = _saved(tmp_path, "db", 5)

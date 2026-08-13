@@ -236,9 +236,14 @@ adding genomes:  write one new part file, rewrite the manifest
 | resident while working | the database | one partition |
 
 The forward tables exist only to build the inverted ones, and the k-mer join
-reads both sides as inverted indexes, so nothing ever reads them back. Local ids
-are what make a merge manifest-only: a posting list means nothing outside its
-own partition, so partitions are never rewritten when databases combine.
+reads both sides as inverted indexes, so nothing ever reads them back.
+
+**There is no merge, and no incremental append.** Both existed and both are
+gone, because both preserve whatever partitioning their inputs had — merging N
+one-genome databases produced N one-genome partitions, measured at 797
+pairs/s/thread against 72,265 for the same genomes built together. Combining
+collections means putting their crystals in one directory and rebuilding, which
+repacks the index properly and costs 5 s for 2,943 genomes.
 
 ## What changed: the output
 
@@ -381,10 +386,11 @@ zero; `poss_shared_SCPs` uses the `minimum` of v1's three bulk paths rather than
 the `max` of its one scalar path; and a genome against itself reports `100`
 where v1 reports `>90%`.
 
-**FastAAI 1 command lines still work.** `build_db`, `db_query`, `merge_db`,
-`aai_index`, `single_query`, `multi_query` and `simple_query` are rerouted to
-the new verbs, with arguments preserved where they still mean something and a
-diagnostic where they do not.
+**FastAAI 1 command lines still work.** `build_db`, `db_query`, `aai_index`,
+`single_query`, `multi_query` and `simple_query` are rerouted to the new verbs,
+with arguments preserved where they still mean something and a diagnostic where
+they do not. `merge_db` is the one that no longer has a target: it exits saying
+so and gives the crystal-and-rebuild replacement.
 
 ```python
 import fastaai
@@ -392,11 +398,13 @@ import fastaai
 models = fastaai.ModelSet("models.hmm")
 paths  = fastaai.find_genomes("/path/to/genomes")
 
-records = fastaai.preprocess(paths, models, threads=8, archive_root="arch/")
-db, skipped = fastaai.build_database(records, models)
-res = fastaai.search(db, db, threads=8)
+# Preprocess into a run directory; every rank is written as it is produced.
+fastaai.preprocess(paths, models, threads=8,
+                   archive_root="FastAAI", crystal_root="FastAAI/crystals")
 
-db = fastaai.build_from_archive("arch/")   # rebuild in seconds
+# Crystals are the only route into an index. Rust parses them.
+db  = fastaai.build_from_crystals("FastAAI/crystals", models)
+res = fastaai.search(db, db, threads=8)
 
 res.jaccard   # (n, n) float64, NaN where no accession is shared
 res.shared    # (n, n) uint32, accessions carried by both genomes
@@ -430,9 +438,10 @@ unverifiable rather than treated as a conflict.
 
 ## Status
 
-Working end to end: on-disk partitioned databases, merge, archives, the
-FastAAI 1 compatible CLI, and optional per-pair Jaccard standard deviation
-(`--do_stdev`). 87 Python and 44 Rust tests.
+Working end to end: on-disk partitioned databases, the three stored
+preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
+optional per-pair Jaccard standard deviation (`--do_stdev`). 226 Python and 53
+Rust tests.
 
 Not yet packaged for bioconda.
 

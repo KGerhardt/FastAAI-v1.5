@@ -1,8 +1,15 @@
 """Equivalence harness: FastAAI 2 against FastAAI 1 on the same genomes.
 
-Run as a script, not under pytest — it needs a v1 output file and an archive.
+Run as a script, not under pytest — it needs a v1 output file and a crystal
+set. The crystals are published alongside the release as a tar.gz, so the
+evidence behind this harness travels with the code rather than needing a 1.7 GB
+collection of stored proteins regenerated locally.
 
-    python equivalence_v1.py <v1_results_dir> <archive_dir>
+    python equivalence_v1.py <v1_results_dir> <crystal_dir>
+
+The v1-compatible run passes `alphabet=V1_ALPHABET` so the 21-symbol alphabet is
+applied at k-merisation. Crystals hold sequences, not k-mers, so a single
+crystal set serves both runs.
 
 FastAAI 2 differs from v1 in one place that changes numbers: **v2 excludes the
 stop codon `*` from the k-mer alphabet, and v1 does not.**
@@ -44,7 +51,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from fastaai.ingest import genome_name  # noqa: E402
-from fastaai.pipeline import build_from_archive, search  # noqa: E402
+from fastaai.pipeline import build_from_crystals, search  # noqa: E402
+from fastaai.search import ModelSet  # noqa: E402
 
 #: v1's effective alphabet: the 20 residues plus the stop codon its numpy
 #: k-merizer never filtered out.
@@ -109,7 +117,8 @@ def compare(label: str, v1: dict, res, names: list[str]) -> dict:
 def main() -> int:
     if len(sys.argv) != 3:
         raise SystemExit(__doc__)
-    v1_dir, archive = Path(sys.argv[1]), Path(sys.argv[2])
+    v1_dir, crystals = Path(sys.argv[1]), Path(sys.argv[2])
+    models = ModelSet()
 
     v1 = load_v1(v1_dir)
     subset = {q for q, _ in v1} | {t for _, t in v1}
@@ -117,13 +126,13 @@ def main() -> int:
 
     print("\nbuilding v2 with v1-compatible settings "
           f"(alphabet={V1_ALPHABET!r}, filter=v1) ...")
-    db = build_from_archive(archive, mode="v1", only=subset, alphabet=V1_ALPHABET)
+    db = build_from_crystals(crystals, models, alphabet=V1_ALPHABET, only=subset)
     compat = search(db, db, threads=8)
     a = compare("bug-compatible — any difference here is a FastAAI 2 fault", v1,
                 compat, db.genome_names)
 
     print("\nbuilding v2 with shipped settings (20-symbol alphabet, filter=v1) ...")
-    db2 = build_from_archive(archive, mode="v1", only=subset)
+    db2 = build_from_crystals(crystals, models, only=subset)
     shipped = search(db2, db2, threads=8)
     b = compare("shipped — difference here is the size of the stop-codon fix",
                 v1, shipped, db2.genome_names)
