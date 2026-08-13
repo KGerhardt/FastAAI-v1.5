@@ -30,6 +30,10 @@ class GenomeRecord:
     #: Full preprocessing output, retained only long enough to archive it.
     proteins: dict[str, str] | None = None
     hits: list | None = None
+    #: accession -> the gene call that won it. Provenance for crystals: which
+    #: predicted protein a stored SCP sequence came from. Small — one short
+    #: string per SCP — so it survives `release()`.
+    scp_proteins: dict[str, str] | None = None
 
     def release(self) -> None:
         """Drop the bulky fields once archived — proteins are ~900 KB/genome."""
@@ -42,6 +46,8 @@ def preprocess_one(
     models: ModelSet,
     mode: FilterMode = DEFAULT_FILTER,
     input_kind: str = "auto",
+    crystal_root=None,
+    compress: bool = False,
 ) -> GenomeRecord:
     """Predict (if needed) and HMM-search one input.
 
@@ -50,6 +56,12 @@ def preprocess_one(
     reference-build path, since GTDB ships predicted proteins and re-predicting
     600k genomes would be ~4 s each of pure waste. Prodigal remains mandatory
     for query genomes, which arrive as nucleotides.
+
+    With *crystal_root* the worker writes its own crystal, which is the point at
+    which this genome stops needing to be held: formatting (and compression, if
+    asked for) happens on the worker thread instead of the collector, and the
+    caller can drop the sequences immediately rather than carrying every
+    genome's SCPs until the build.
     """
     name = genome_name(path)
     if input_kind == "auto":
@@ -62,7 +74,13 @@ def preprocess_one(
         hits = search_hits(proteins, models, cpus=1)
         assignment = resolve_hits(hits, mode)
         scps = {acc: proteins[prot] for prot, acc in assignment.items()}
-        return GenomeRecord(name, scps, table, proteins=proteins, hits=hits)
+        origins = {acc: prot for prot, acc in assignment.items()}
+        if crystal_root is not None:
+            from . import crystal
+            crystal.write(crystal_root, name, scps, models.fingerprint, mode,
+                          table, origins, compress)
+        return GenomeRecord(name, scps, table, proteins=proteins, hits=hits,
+                            scp_proteins=origins)
     except Exception as exc:  # a bad genome must not abort the run
         return GenomeRecord(name, {}, None, error=f"{type(exc).__name__}: {exc}")
 
@@ -75,6 +93,8 @@ def preprocess(
     progress: Callable[[int, int, GenomeRecord], None] | None = None,
     archive_root=None,
     input_kind: str = "auto",
+    crystal_root=None,
+    compress: bool = False,
 ) -> list[GenomeRecord]:
     """Predict and HMM-search every genome. Order of *paths* is preserved.
 
@@ -83,14 +103,23 @@ def preprocess(
     With *archive_root*, proteins and raw hits are written as each genome
     finishes and then released, so peak memory stays flat and the run never has
     to be repeated.
+
+    **With *crystal_root*, each worker writes its own crystal and the returned
+    records come back with `scps` cleared.** That is the point of it: the SCPs
+    are on disk, so nothing needs to hold every genome's sequences until the
+    build, and peak memory stops depending on how many genomes there are. Build
+    from the crystal directory (`build_from_crystals`) rather than from these
+    records — `build_database` would find nothing in them.
     """
     paths = list(paths)
     out: list[GenomeRecord | None] = [None] * len(paths)
-    archive = (Archive(archive_root, models.accessions, models.fingerprint)
+    archive = (Archive(archive_root, models.accessions, models.fingerprint,
+                       compress)
                if archive_root else None)
     with ThreadPoolExecutor(max_workers=max(1, threads)) as pool:
         futures = {
-            pool.submit(preprocess_one, p, models, mode, input_kind): i
+            pool.submit(preprocess_one, p, models, mode, input_kind,
+                        crystal_root, compress): i
             for i, p in enumerate(paths)
         }
         done = 0
@@ -101,6 +130,12 @@ def preprocess(
                 archive.add(rec.name, rec.proteins, rec.hits or [],
                             rec.translation_table)
             rec.release()
+            if crystal_root is not None:
+                # Written by the worker and now on disk, so the SCPs need not be
+                # carried for the rest of the run. This is what keeps peak
+                # memory independent of collection size.
+                rec.scps = {}
+                rec.scp_proteins = None
             out[i] = rec
             done += 1
             if progress:
@@ -163,6 +198,102 @@ def build_from_archive(
     return db
 
 
+def build_from_crystals(
+    source,
+    models: ModelSet,
+    k: int | None = None,
+    alphabet: str | None = None,
+) -> "_core.Database":
+    """Build a sealed database from crystals — no prediction, no HMM search.
+
+    **Accession order comes from *models*, never from the crystals.** Accession
+    IDs are positions in a list, so deriving that list from whichever accessions
+    happen to appear would make the schema depend on which genomes were included:
+    two subsets of one collection would number their shared markers differently
+    and refuse to be compared. Taking the order from the model set means any
+    subset builds a database comparable with any other.
+
+    The crystals' recorded fingerprint must match *models* for the same reason
+    the engine checks it anywhere else — mismatched marker sets produce
+    well-formed, meaningless AAI.
+    """
+    from . import crystal
+
+    acc_index = {a: i for i, a in enumerate(models.accessions)}
+    db = _core.Database(
+        models.accessions,
+        k if k is not None else _core.DEFAULT_K,
+        alphabet if alphabet is not None else _core.DEFAULT_ALPHABET,
+    )
+
+    prov = None
+    checked = False
+    n = 0
+    # Streamed, so peak memory is one crystal file rather than the collection.
+    for genome, scps, prov in crystal.iter_genomes(source):
+        if not checked:
+            # The fingerprint is uniform across a run — `iter_genomes` raises on
+            # any disagreement — so it only needs testing against the model set
+            # once, on the first genome that carries one.
+            stored = prov.as_dict()["models"]
+            if stored and stored != models.fingerprint:
+                raise ValueError(
+                    "these crystals were not built with this model set\n"
+                    f"  crystals:  {stored}\n"
+                    f"  model set: {models.fingerprint}\n"
+                    "Pass --hmm naming the models the crystals were made with."
+                )
+            checked = bool(stored)
+        unknown = set(scps) - set(acc_index)
+        if unknown:
+            raise ValueError(
+                f"crystals reference {len(unknown)} accession(s) absent from the "
+                f"model set, e.g. {sorted(unknown)[:3]}"
+            )
+        payload = [(acc_index[a], seq.encode()) for a, seq in sorted(scps.items())]
+        if payload:
+            db.add_genome(genome, payload)
+            n += 1
+
+    if not n:
+        raise RuntimeError(f"no genome in {source} yielded a usable SCP set")
+    db.seal()
+    fields = prov.as_dict() if prov is not None else {}
+    db.models = fields.get("models") or models.fingerprint
+    if fields.get("filter"):
+        db.filter_mode = fields["filter"]
+    return db
+
+
+def crystallize_archive(root, out, models: ModelSet,
+                        mode: FilterMode = DEFAULT_FILTER,
+                        compress: bool = False) -> int:
+    """Emit crystals from an existing archive, without re-running anything.
+
+    The archive already holds proteins and raw hits, so this is a resolve and a
+    write — the point being that a collection preprocessed before crystals
+    existed does not have to be preprocessed again.
+    """
+    from . import crystal
+    from .archive import read_fingerprint, read_hits, read_proteins
+
+    fingerprint = read_fingerprint(root) or models.fingerprint
+    n = 0
+    for genome, hits in read_hits(root):
+        assignment = resolve_hits(hits, mode)
+        if not assignment:
+            continue
+        proteins = read_proteins(root, genome)
+        scps = {acc: proteins[prot] for prot, acc in assignment.items()
+                if prot in proteins}
+        origins = {acc: prot for prot, acc in assignment.items()
+                   if prot in proteins}
+        if crystal.write(out, genome, scps, fingerprint, mode, None, origins,
+                         compress):
+            n += 1
+    return n
+
+
 def build_database(
     records: Iterable[GenomeRecord],
     models: ModelSet,
@@ -190,7 +321,11 @@ def build_database(
         db.add_genome(rec.name, payload)
         kept.append(rec)
     if not kept:
-        raise RuntimeError("no genome yielded a usable SCP set")
+        raise RuntimeError(
+            "no genome yielded a usable SCP set. If these records came from "
+            "`preprocess(crystal_root=...)` their SCPs are on disk by design — "
+            "build from the crystal directory with `build_from_crystals`."
+        )
     db.seal()
     return db, skipped
 

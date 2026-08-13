@@ -190,10 +190,12 @@ def test_query_without_target_is_a_self_comparison(tmp_path):
     assert len(rows) == 9, "3 x 3 pairs"
 
 
-def test_parser_exposes_three_verbs():
+def test_parser_exposes_the_expected_verbs():
+    """Three search verbs, plus `crystallize`, which moves data between the
+    preprocessing ranks rather than computing anything."""
     p = build_parser()
     sub = [a for a in p._actions if a.dest == "command"][0]
-    assert set(sub.choices) == {"build", "query", "merge"}
+    assert set(sub.choices) == {"build", "query", "merge", "crystallize"}
 
 
 # --- AAI reporting band -------------------------------------------------------

@@ -187,11 +187,15 @@ def test_multi_block_output_covers_every_pair_exactly_once(tmp_path, multipart):
         assert got == ("N/A" if np.isnan(want) else _pyround(want, 4))
 
 
-def test_a_multi_block_search_refuses_to_write_to_one_file(tmp_path, multipart):
-    """Silently concatenating blocks into stdout would defeat the point."""
+def test_a_multi_block_search_refuses_to_write_to_stdout(tmp_path, multipart):
+    """Silently concatenating blocks into stdout would defeat the point.
+
+    Only reachable by asking for stdout explicitly, now that the default is a
+    directory that always receives block files.
+    """
     q = _saved(tmp_path, "q", 3, start=90_000)
     with pytest.raises(SystemExit):
-        main(["query", "-q", q, "-t", multipart, "--quiet"])
+        main(["query", "-q", q, "-t", multipart, "-o", "-", "--quiet"])
 
 
 def test_matrix_is_written_per_block_like_the_tsv(tmp_path, multipart):
@@ -294,9 +298,24 @@ def test_stdev_adds_a_column_matching_the_api(tmp_path):
         assert r["jacc_SD"] == expect
 
 
-def test_stdout_is_the_default_for_a_single_block(tmp_path, capfd):
+def test_results_default_into_the_run_directory(tmp_path, _isolate_cwd):
+    """Output is durable by default: results land in <dir>/results/ as block
+    files, whether the search is one block or many."""
     p = _saved(tmp_path, "db", 4)
     main(["query", "-q", p, "--quiet"])
+
+    results = _isolate_cwd / "FastAAI" / "results"
+    blocks = sorted(results.glob("block_*.tsv"))
+    assert len(blocks) == 1, "a 1x1 search is still one block file, not a bare file"
+    rows = blocks[0].read_text().strip().split("\n")
+    assert rows[0].startswith("query\ttarget\tavg_jacc_sim")
+    assert len(rows) == 1 + 16
+
+
+def test_dash_still_writes_to_stdout(tmp_path, capfd):
+    """The explicit escape hatch survives the default changing."""
+    p = _saved(tmp_path, "db", 4)
+    main(["query", "-q", p, "-o", "-", "--quiet"])
     out = capfd.readouterr().out
     assert out.startswith("query\ttarget\tavg_jacc_sim")
     assert len(out.strip().split("\n")) == 1 + 16
