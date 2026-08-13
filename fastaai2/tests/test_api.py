@@ -249,3 +249,70 @@ def test_model_spec_accepts_a_path_and_a_modelset():
     default = _models(None)
     assert len(_models(default.path)) == len(default)
     assert _models(default) is default
+
+
+# --- metadata and iteration ---------------------------------------------------
+
+def test_queries_and_targets_name_the_sides(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    assert res.queries == res.query_names
+    assert res.targets == res.target_names
+    assert res.shape == (len(res.queries), len(res.targets))
+
+
+def test_scps_reports_marker_counts(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    for g in res.queries:
+        assert res.scps(g) > 0
+    with pytest.raises(KeyError):
+        res.scps("not_a_genome")
+
+
+def test_iteration_skips_self_and_empty_pairs(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    got = list(res)
+    assert all(m.query != m.target for m in got)
+    assert all(m.shared > 0 for m in got), "a pair with no shared marker is no evidence"
+    assert len(list(res(include_self=True))) > len(got)
+
+
+def test_shared_frac_is_shared_over_possible(tmp_path):
+    """The number that tells a distant pair from a poor assembly."""
+    db, res = _tiny_result(tmp_path)
+    for m in res:
+        assert m.poss_shared > 0
+        assert m.shared_frac == pytest.approx(m.shared / m.poss_shared)
+        assert 0.0 < m.shared_frac <= 1.0
+
+
+def test_filters_are_inclusive_and_compose(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    everything = list(res)
+    floor = min(m.aai for m in everything)
+
+    assert len(list(res(min_aai=floor))) == len(everything), "inclusive"
+    assert all(m.aai >= floor + 1 for m in res(min_aai=floor + 1))
+    assert all(m.shared_frac >= 0.5 for m in res(min_shared_frac=0.5))
+    assert all(m.shared >= 2 for m in res(min_shared=2))
+    assert len(list(res(min_aai=floor, min_shared_frac=0.0))) == len(everything)
+
+
+def test_selecting_a_side(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    one = res.queries[0]
+    assert {m.query for m in res(query=one)} == {one}
+    assert {m.query for m in res(query=[one])} == {one}
+    assert {m.target for m in res(target=one, include_self=True)} == {one}
+    # "any" and None are the same thing: no filter.
+    assert len(list(res(query="any"))) == len(list(res(query=None)))
+    with pytest.raises(KeyError):
+        list(res(query="nope"))
+
+
+def test_min_shared_frac_needs_the_counts(tmp_path):
+    """Without counts the fraction has no denominator, and silently returning
+    everything would be worse than saying so."""
+    db, res = _tiny_result(tmp_path)
+    res.query_scps = None
+    with pytest.raises(RuntimeError, match="min_shared_frac"):
+        list(res(min_shared_frac=0.5))

@@ -259,6 +259,22 @@ def crystallize_archive(root, out, models: ModelSet,
     return n
 
 
+def _select(spec, names: list[str]) -> list[int]:
+    """A side selector to row indices.
+
+    `"any"` and None mean all of them — the default, so a caller filtering only
+    on thresholds does not have to name every genome.
+    """
+    if spec is None or spec == "any":
+        return list(range(len(names)))
+    wanted = [spec] if isinstance(spec, str) else list(spec)
+    index = {n: i for i, n in enumerate(names)}
+    missing = [w for w in wanted if w not in index]
+    if missing:
+        raise KeyError(f"not in this result: {missing[:3]}")
+    return [index[w] for w in wanted]
+
+
 class Match(NamedTuple):
     """One pair, as a caller reads it.
 
@@ -271,6 +287,20 @@ class Match(NamedTuple):
     aai: float
     jaccard: float
     shared: int
+    #: Markers the poorer of the two genomes carries — the ceiling on `shared`.
+    #: Zero only when the counts were unavailable.
+    poss_shared: int = 0
+
+    @property
+    def shared_frac(self) -> float:
+        """`shared / poss_shared`: how much of what *could* be compared was.
+
+        The number that separates "these genomes are distant" from "one of them
+        is a poor assembly". A pair at AAI 60 over 8 of 78 possible markers is a
+        different claim from the same AAI over 76, and only this tells them
+        apart.
+        """
+        return self.shared / self.poss_shared if self.poss_shared else float("nan")
 
 
 @dataclass
@@ -317,6 +347,95 @@ class SearchResult:
     def _self_pair(self, qi: int, ti: int) -> bool:
         return self.query_names[qi] == self.target_names[ti]
 
+    @property
+    def queries(self) -> list[str]:
+        """The genomes on the query side, in row order."""
+        return self.query_names
+
+    @property
+    def targets(self) -> list[str]:
+        """The genomes on the target side, in column order."""
+        return self.target_names
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return len(self.query_names), len(self.target_names)
+
+    def scps(self, genome: str) -> int:
+        """Markers *genome* carries. Raises if it is in neither side."""
+        if self.query_scps is not None and genome in self.query_names:
+            return self.query_scps[self.query_names.index(genome)]
+        if self.target_scps is not None and genome in self.target_names:
+            return self.target_scps[self.target_names.index(genome)]
+        raise KeyError(f"{genome!r} is not in this result, or counts are absent")
+
+    def _poss(self, qi: int, ti: int) -> int:
+        if self.query_scps is None or self.target_scps is None:
+            return 0
+        return min(self.query_scps[qi], self.target_scps[ti])
+
+    def _match(self, qi: int, ti: int, aai, jac, shared) -> "Match":
+        return Match(self.query_names[qi], self.target_names[ti],
+                     float(aai[qi, ti]), float(jac[qi, ti]),
+                     int(shared[qi, ti]), self._poss(qi, ti))
+
+    def __call__(self, query="any", target="any", *, min_aai: float | None = None,
+                 max_aai: float | None = None, min_shared: int | None = None,
+                 min_shared_frac: float | None = None,
+                 include_self: bool = False):
+        """Iterate the pairs that pass a filter.
+
+            for m in result(query="any", min_aai=60, min_shared_frac=0.5):
+                ...
+
+        *query* and *target* select a side: `"any"` (or None) for all of them, a
+        genome name for one, or any collection of names for several. The rest
+        are thresholds, and all of them are inclusive.
+
+        `min_shared_frac` is `shared / poss_shared` — of the markers the poorer
+        genome carries, the fraction actually compared. It is the filter that
+        separates a genuinely distant pair from a pair where one genome is a bad
+        assembly, and it needs the counts `search` records.
+
+        Pairs sharing no marker never appear: no shared marker is an absence of
+        evidence, not a measurement. Self-pairs are excluded unless asked for,
+        for the same reason `best_hit` excludes them.
+        """
+        qsel = _select(query, self.query_names)
+        tsel = _select(target, self.target_names)
+        if min_shared_frac is not None and (self.query_scps is None
+                                            or self.target_scps is None):
+            raise RuntimeError(
+                "min_shared_frac needs the per-genome marker counts, which this "
+                "result does not carry; it was not produced by `search`"
+            )
+
+        aai, jac = self.aai, self.jaccard
+        shared = np.asarray(self.shared)
+        for qi in qsel:
+            for ti in tsel:
+                s = int(shared[qi, ti])
+                if s == 0:
+                    continue
+                if not include_self and self._self_pair(qi, ti):
+                    continue
+                a = aai[qi, ti]
+                if min_aai is not None and not (a >= min_aai):
+                    continue
+                if max_aai is not None and not (a <= max_aai):
+                    continue
+                if min_shared is not None and s < min_shared:
+                    continue
+                if min_shared_frac is not None:
+                    poss = self._poss(qi, ti)
+                    if not poss or s / poss < min_shared_frac:
+                        continue
+                yield self._match(qi, ti, aai, jac, shared)
+
+    def __iter__(self):
+        """Every pair that shares a marker, self-pairs excluded."""
+        return self()
+
     def hits_for(self, query: str, *, k: int | None = None,
                  min_aai: float | None = None,
                  include_self: bool = False) -> list["Match"]:
@@ -344,7 +463,8 @@ class SearchResult:
             if min_aai is not None and aai[ti] < min_aai:
                 break
             out.append(Match(query, self.target_names[ti], float(aai[ti]),
-                             float(jac[ti]), int(shared[ti])))
+                             float(jac[ti]), int(shared[ti]),
+                             self._poss(qi, int(ti))))
             if k is not None and len(out) >= k:
                 break
         return out
@@ -375,7 +495,7 @@ class SearchResult:
                 if not include_self and self._self_pair(qi, ti):
                     continue
                 yield Match(q, t, float(aai[qi, ti]), float(jac[qi, ti]),
-                            int(shared[qi, ti]))
+                            int(shared[qi, ti]), self._poss(qi, ti))
 
     def to_tsv(self, path, *, include_self: bool = True) -> "os.PathLike | str":
         """Write FastAAI 1's TSV — same columns, same names, same order.

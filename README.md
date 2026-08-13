@@ -406,15 +406,28 @@ Reading the result. The matrices stay public, but the questions people actually
 ask have answers:
 
 ```python
-res.best_hit("GCF_000007085.1")        # Match(query, target, aai, jaccard, shared)
+res.queries, res.targets     # the genomes on each side, in row/column order
+res.shape                    # (n_queries, n_targets)
+res.scps("GCF_000007085.1")  # markers that genome carries
+
+res.best_hit("GCF_000007085.1")        # Match(query, target, aai, jaccard, shared, poss_shared)
 res.hits_for("GCF_000007085.1", k=5)   # its five nearest, best first
 res.top_hits(k=5)                      # that, for every query
-res.rows()                             # every pair, long format
+
+# Filtered iteration. Call it to filter, or iterate it for everything.
+for m in res(query="any", min_aai=60, min_shared_frac=0.5):
+    print(m.query, m.target, m.aai, m.shared_frac)
 
 res.jaccard   # (n, n) float64, NaN where no accession is shared
 res.shared    # (n, n) uint32, accessions carried by both genomes
 res.aai       # (n, n) float64, uncensored
 ```
+
+`query=` and `target=` take `"any"` for all of them, one name, or a collection
+of names; the thresholds are inclusive. `min_shared_frac` is
+`shared / poss_shared` — of the markers the poorer genome carries, the fraction
+actually compared, which is what separates a genuinely distant pair from a pair
+where one genome is a bad assembly.
 
 A self-comparison's diagonal is a genome against itself, so it is **not** a
 neighbour: `hits_for` and `best_hit` skip it unless you pass
@@ -486,7 +499,7 @@ unverifiable rather than treated as a conflict.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 250 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 257 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.
