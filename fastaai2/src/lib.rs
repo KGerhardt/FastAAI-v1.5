@@ -267,7 +267,14 @@ impl Database {
     /// protein sequence. Duplicate accessions within a genome are rejected —
     /// silently keeping the last would corrupt results invisibly.
     fn add_genome(&mut self, name: &str, scps: Vec<(usize, Vec<u8>)>) -> PyResult<()> {
-        if !self.partitions.is_empty() {
+        // `sealed()`, not `partitions.is_empty()`. A streamed database holds no
+        // resident partitions — they are on disk behind `part_paths` — so the
+        // narrower check passed for one, and the genome landed in the builder's
+        // `names`/`sets` while the real index went untouched. That desync did
+        // not surface here: the database then reported the extra genome, saved
+        // without complaint, and either panicked on query or wrote a database
+        // missing most of its genomes.
+        if self.sealed() {
             return Err(PyRuntimeError::new_err("database is sealed; cannot add genomes"));
         }
 

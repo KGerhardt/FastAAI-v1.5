@@ -287,6 +287,33 @@ def test_saving_an_unsealed_database_is_rejected(tmp_path):
         db.save(str(tmp_path / "db"))
 
 
+def test_adding_to_a_streamed_database_is_rejected(tmp_path):
+    """A database reopened from disk is sealed, and must say so.
+
+    The seal check once read `partitions.is_empty()`, which is true of a
+    streamed database because its partitions live on disk. The add was accepted
+    against the builder's own state, so the database reported a genome the index
+    did not contain — then panicked on query, or saved a database missing most
+    of its genomes. Silent, and destructive.
+    """
+    db = _small_db(tmp_path)
+    path = str(tmp_path / "streamed.fastaai")
+    db.save(path)
+
+    reopened = fastaai._core.open_database(path)
+    assert reopened.is_sealed and reopened.is_streamed
+    before = reopened.n_genomes
+
+    with pytest.raises(RuntimeError, match="sealed"):
+        reopened.add_genome("intruder", [(0, b"MKVLAATTGG")])
+    assert reopened.n_genomes == before
+
+    # And the database still round-trips intact.
+    out = str(tmp_path / "roundtrip.fastaai")
+    reopened.save(out)
+    assert fastaai._core.open_database(out).n_genomes == before
+
+
 def test_opening_a_missing_database_errors(tmp_path):
     with pytest.raises(Exception):
         fastaai._core.open_database(str(tmp_path / "nope"))
