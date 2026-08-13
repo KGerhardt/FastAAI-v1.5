@@ -1,6 +1,6 @@
 """Command line entry point.
 
-Three verbs replace FastAAI 1's seven modules:
+Two verbs replace FastAAI 1's seven modules:
 
     fastaai build   inputs -> a database
     fastaai query   database x database -> AAI
