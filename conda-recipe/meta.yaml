@@ -50,6 +50,11 @@ test:
     # The bundled model set must survive packaging: without it `build` cannot
     # run without --hmm, which is the whole point of shipping it.
     - python -c "from fastaai.search import ModelSet; m = ModelSet(); assert len(m) == 122, len(m); print('bundled models:', len(m), m.fingerprint[:16])"
+    # The packaged GTDB sets travel too, and `gtdb-all` is their union: a
+    # concatenation would be 173 with 5 accessions repeated.
+    # No ": " anywhere in this command — YAML reads a colon-space inside an
+    # unquoted scalar as a mapping and refuses to parse the recipe.
+    - python -c "from fastaai.search import ModelSet, MODEL_SETS; s = {k:ModelSet(k) for k in MODEL_SETS}; n = {k:len(v) for k,v in s.items()}; assert [n[k] for k in ('gtdb-bact','gtdb-arch','gtdb-all')] == [120, 53, 168], n; assert len({v.fingerprint for v in s.values()}) == 3; print('gtdb sets', n)"
     # And the engine works end to end on a real single-copy protein.
     - python -c "import fastaai; d = fastaai.Database(['a']); d.add_genome('g', [(0, b'MFRFFKSIGQEMREVDWPNFKQLRKDSSTVISTSVFFIAFLALARLANSIVP')]); d.seal(); r = fastaai.search(d, d, threads=1); print('self jaccard:', r.jaccard[0][0])"
 
@@ -72,3 +77,9 @@ about:
     The 122 single-copy protein HMMs FastAAI 1 shipped are bundled and used by
     default. They are redistributed under the MIT licence and carry their
     original notice; see the README beside them.
+
+    GTDB's bac120 and ar53 marker sets are bundled as well, selected with
+    --hmm gtdb-bact, gtdb-arch or gtdb-all, so an install needs no HMM
+    download. They are assembled from Pfam and TIGRFAM rather than copied from
+    GTDB-Tk, and the Pfam versions GTDB pins have since moved on, so they do not
+    reproduce GTDB's trees.

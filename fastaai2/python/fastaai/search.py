@@ -11,6 +11,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import os
+import sys
 from dataclasses import dataclass
 from typing import Literal
 
@@ -72,11 +73,87 @@ HMM_READ_BUFFER = 1 << 20
 BUNDLED_HMM = "Complete_SCG_DB.hmm.gz"
 
 
-def bundled_hmm_path() -> str:
-    """Filesystem path to the packaged model set."""
+#: Marker sets shipped besides the default, selected by keyword instead of path.
+#:
+#: `--hmm` otherwise names a file, which makes a packaged set awkward to reach:
+#: it lives inside site-packages at a path that varies by install. These names
+#: resolve to the shipped files wherever they landed.
+#:
+#: Each maps to the files it is built from and a human label. `gtdb-all` names
+#: both, because it is their *union*, assembled by `ModelSet` rather than
+#: shipped as a third file. Nothing here is a default; the bundled 122 SCPs
+#: remain what a bare `fastaai build` uses, and each of these sets fingerprints
+#: differently, so databases built from different keywords refuse to compare.
+GTDB_BAC120 = "gtdb_bac120.hmm.gz"
+GTDB_AR53 = "gtdb_ar53.hmm.gz"
+
+MODEL_SETS: dict[str, tuple[tuple[str, ...], str]] = {
+    "gtdb-bact": ((GTDB_BAC120,), "GTDB bac120 (bacteria)"),
+    "gtdb-arch": ((GTDB_AR53,), "GTDB ar53 (archaea)"),
+    "gtdb-all": ((GTDB_BAC120, GTDB_AR53), "GTDB bac120 + ar53"),
+}
+
+
+def data_path(name: str) -> str:
+    """Filesystem path to a file packaged in `fastaai/data`."""
     from importlib import resources
 
-    return str(resources.files(__package__) / "data" / BUNDLED_HMM)
+    return str(resources.files(__package__) / "data" / name)
+
+
+def bundled_hmm_path() -> str:
+    """Filesystem path to the packaged default model set."""
+    return data_path(BUNDLED_HMM)
+
+
+def model_set_key(spec: os.PathLike | str | None) -> str | None:
+    """The `MODEL_SETS` key a `--hmm` value names, or None if it names a file.
+
+    Single source of the normalisation rule, so callers that report which set
+    was used agree with the one that loads it.
+
+    `gtdb_bact`, `GTDB-BACT` and `gtdb-bact` are plainly the same request — case
+    and separator are the two ways people habitually vary a name like this, and
+    rejecting them teaches nothing. Anything holding a path separator is a path.
+    """
+    if spec is None:
+        return None
+    text = os.fspath(spec)
+    if os.sep in text or (os.altsep and os.altsep in text):
+        return None
+    key = text.lower().replace("_", "-")
+    return key if key in MODEL_SETS else None
+
+
+def resolve_model_spec(spec: os.PathLike | str) -> list[str]:
+    """A `--hmm` value to the HMM files it names.
+
+    A keyword from `MODEL_SETS` wins over a file of the same name in the working
+    directory. The alternative — letting a local file shadow the keyword — makes
+    `--hmm gtdb-bact` mean different things in different directories, and the
+    failure is silent: a stray file builds a database with a valid fingerprint
+    that is simply not GTDB's. Shadowing is reported rather than obeyed, and a
+    path that contains a separator (`./gtdb-bact`) is never read as a keyword.
+    """
+    text = os.fspath(spec)
+    key = model_set_key(text)
+    if key is not None:
+        if os.path.exists(text):
+            print(f"note: --hmm {text} is the packaged model set, not the file of "
+                  f"that name here; use ./{text} for the file", file=sys.stderr)
+        return [data_path(n) for n in MODEL_SETS[key][0]]
+
+    # A near miss is a typo, not a filename. Saying "no such file" for `gtdb`
+    # or `gtdb-bac` would send the user hunting for a download that does not
+    # exist, when the set is already installed under a neighbouring name.
+    if text.lower().replace("_", "-").startswith("gtdb") and not os.path.exists(text):
+        raise SystemExit(
+            f"--hmm {text}: no such model set or file. The packaged GTDB sets are\n"
+            + "\n".join(f"  {k:<10} {len(MODEL_SETS[k][0])} file(s) — {MODEL_SETS[k][1]}"
+                        for k in MODEL_SETS)
+            + "\nThey fingerprint differently and cannot be compared with each other."
+        )
+    return [text]
 
 
 def _open_hmm(path: str):
@@ -121,16 +198,40 @@ class ModelSet:
 
     def __init__(self, path: os.PathLike | str | None = None):
         #: None selects the bundled set, so callers need not know where it lives.
-        self.path = os.fspath(path) if path is not None else bundled_hmm_path()
+        #: A string may also be a keyword from `MODEL_SETS`, which can name more
+        #: than one file.
+        self.paths = [bundled_hmm_path()] if path is None else resolve_model_spec(path)
+        #: The first source, kept because it is what a single-file set *is*.
+        self.path = self.paths[0]
         self.alphabet = pyhmmer.easel.Alphabet.amino()
-        self.hmms = _load_hmms(self.path)
-        if not self.hmms:
-            raise ValueError(f"no HMMs found in {self.path}")
 
+        loaded = [h for p in self.paths for h in _load_hmms(p)]
+        if not loaded:
+            raise ValueError(f"no HMMs found in {', '.join(self.paths)}")
+
+        # Multi-file sets are a *union*, not a concatenation. bac120 and ar53
+        # share 5 markers, and keeping both copies would break the invariant the
+        # whole schema rests on — accession IDs are positions in this list, and
+        # `acc_index` is keyed by accession, so a repeat silently makes one
+        # position unaddressable and lets one protein occupy two slots.
+        #
+        # Only merges are deduplicated. A single file holding a repeated
+        # accession is a defect in that file, and quietly dropping models would
+        # hide it.
+        self.hmms = []
         self.accessions: list[str] = []
-        for hmm in self.hmms:
+        #: Accessions a multi-file set found in more than one of its sources.
+        self.shared: list[str] = []
+        seen: set[str] = set()
+        for hmm in loaded:
             raw = hmm.accession or hmm.name
-            self.accessions.append(raw.decode() if isinstance(raw, bytes) else str(raw))
+            acc = raw.decode() if isinstance(raw, bytes) else str(raw)
+            if len(self.paths) > 1 and acc in seen:
+                self.shared.append(acc)
+                continue
+            seen.add(acc)
+            self.hmms.append(hmm)
+            self.accessions.append(acc)
         self.acc_index = {a: i for i, a in enumerate(self.accessions)}
 
         # `bit_cutoffs="trusted"` raises on models lacking TC lines, which
