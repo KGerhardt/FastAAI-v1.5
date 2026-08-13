@@ -372,3 +372,36 @@ def test_all_steps_writes_every_rank_for_one_genome(tmp_path):
     # The record carries counts, not sequence — that is what lets it cross a
     # process boundary cheaply.
     assert rec.n_proteins > 0 and rec.scps == {}
+
+
+def test_models_are_built_once_per_worker_not_per_task(tmp_path, monkeypatch):
+    """The pool initializer is what makes reusing HMM data free per genome.
+
+    Built per task instead, every genome would re-parse 9.2 MB of HMM text —
+    the mistake FastAAI 1 made, where a 16-process pool spent ~66 s on parsing
+    alone.
+    """
+    import os
+    from fastaai import api
+
+    marks = tmp_path / "builds"
+    marks.mkdir()
+    real = api._models
+
+    def counting(spec):
+        m = real(spec)
+        (marks / f"{os.getpid()}_{len(list(marks.iterdir()))}").write_text("x")
+        return m
+
+    monkeypatch.setattr(api, "_models", counting)
+
+    prots = [_protein_file(tmp_path, f"init{i}") for i in range(6)]
+    fastaai.proteins_to_hmms(prots, tmp_path / "hh", processes=3)
+
+    builds = list(marks.iterdir())
+    workers = {b.name.split("_")[0] for b in builds}
+    assert len(builds) == len(workers), (
+        f"{len(builds)} model builds across {len(workers)} workers — "
+        "the initializer should build exactly one per process"
+    )
+    assert len(builds) < len(prots), "fewer builds than tasks"

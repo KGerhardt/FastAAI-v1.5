@@ -112,20 +112,26 @@ def _preprocess_indexed(args):
     return i, _preprocess_task(work)
 
 
-def _preprocess_task(args) -> GenomeRecord:
-    """A worker's whole job. Module level and over plain values, so it pickles.
+def _init_worker(spec) -> None:
+    """Build this process's model set. Runs once, as a pool initializer.
 
-    The model set is rebuilt from its spec inside the worker rather than sent:
-    it holds pyhmmer objects, which are not picklable, and rebuilding it is a
-    per-process cost of ~0.2 s. FastAAI 1 reloaded models per *task*, which on a
-    16-process pool cost ~66 s of pure parsing; per worker it is invisible.
+    A `ModelSet` holds pyhmmer objects and cannot be pickled, so it is rebuilt
+    from its spec rather than sent — and rebuilt *here*, before any task, so
+    having models available costs a genome nothing. FastAAI 1 reloaded them per
+    task and a 16-process pool spent ~66 s on parsing alone.
     """
-    path, spec, mode, input_kind, crystal_root, compress, archive_root = args
+    global _WORKER_MODELS
+    _WORKER_MODELS = ModelSet(spec)
+
+
+def _preprocess_task(args) -> GenomeRecord:
+    """A worker's whole job. Module level and over plain values, so it pickles."""
+    path, mode, input_kind, crystal_root, compress, archive_root = args
     global _WORKER_MODELS
     try:
         ms = _WORKER_MODELS
-    except NameError:
-        ms = _WORKER_MODELS = ModelSet(spec)
+    except NameError:  # serial path, or a direct call
+        ms = _WORKER_MODELS = ModelSet(None)
     return preprocess_one(path, ms, mode, input_kind, crystal_root, compress,
                           archive_root)
 
@@ -167,7 +173,7 @@ def preprocess_paths(
     if not paths:
         return []
 
-    work = [(os.fspath(p), models.spec, mode, input_kind,
+    work = [(os.fspath(p), mode, input_kind,
              None if crystal_root is None else os.fspath(crystal_root),
              compress,
              None if archive_root is None else os.fspath(archive_root))
@@ -181,6 +187,7 @@ def preprocess_paths(
     workers = max(1, processes)
     out: list[GenomeRecord | None] = [None] * len(paths)
     if workers == 1:
+        _init_worker(models.spec)
         for i, w in enumerate(work):
             out[i] = _preprocess_task(w)
             if progress:
@@ -191,7 +198,8 @@ def preprocess_paths(
         # chunksize 1: a genome is seconds of work, so handing them out one at a
         # time costs nothing and keeps a slow genome from stranding a chunk.
         tagged = list(enumerate(work))
-        with mp.Pool(processes=workers) as pool:
+        with mp.Pool(processes=workers, initializer=_init_worker,
+                     initargs=(models.spec,)) as pool:
             done = 0
             for i, rec in pool.imap_unordered(_preprocess_indexed, tagged,
                                               chunksize=1):

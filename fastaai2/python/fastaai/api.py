@@ -58,23 +58,34 @@ def _indexed(args):
     return i, fn(payload)
 
 
-def _run(fn, work: list, processes: int, chunksize: int = 1) -> list:
+def _run(fn, work: list, processes: int, chunksize: int = 1,
+         initializer=None, initargs: tuple = ()) -> list:
     """Map *fn* over *work*, in this process or a pool, preserving order.
 
     `imap_unordered` rather than `map`: results come back as they finish, so a
     long genome cannot hold up the reporting of the hundred that finished behind
     it, and memory does not accumulate a completed-but-unyielded backlog.
+
+    *initializer* runs once per worker. That is where anything expensive and
+    reusable is built — the model set above all, which is 9.2 MB of HMM text to
+    parse. Built there it costs once per process; built per task it would cost
+    every genome, which is the mistake FastAAI 1 made (a 16-way pool spent ~66 s
+    parsing models). It also keeps the spec out of the task payload, so nothing
+    is pickled per item that could be sent once.
     """
     if not work:
         return []
     if processes <= 1:
+        if initializer is not None:
+            initializer(*initargs)
         return [fn(w) for w in work]
 
     import multiprocessing as mp
 
     out: list = [None] * len(work)
     tagged = [(i, fn, w) for i, w in enumerate(work)]
-    with mp.Pool(processes=processes) as pool:
+    with mp.Pool(processes=processes, initializer=initializer,
+                 initargs=initargs) as pool:
         for i, result in pool.imap_unordered(_indexed, tagged, chunksize=chunksize):
             out[i] = result
     return out
@@ -98,8 +109,8 @@ def _predict_unit(args):
 def _hmm_unit(args):
     from .ingest import read_proteins_fasta
 
-    protein, out_dir, spec, compress, name, cpus = args
-    ms = _worker_models(spec)
+    protein, out_dir, compress, name, cpus = args
+    ms = _worker_models()
     hits = search_hits(read_proteins_fasta(protein), ms, cpus=cpus)
     return os.fspath(layout.write_text(
         Path(out_dir) / f"{layout.safe(name)}{layout.TABLE_EXT}",
@@ -108,19 +119,23 @@ def _hmm_unit(args):
         compress))
 
 
-def _worker_models(spec) -> ModelSet:
-    """The model set for this process, built once.
+def _init_models(spec) -> None:
+    """Build this process's model set. Runs once, as a pool initializer.
 
-    Under `fork` the parent's set is already here and this never runs; under
-    `spawn` it rebuilds from the spec, because a `ModelSet` holds pyhmmer
-    objects and cannot be pickled. Either way it is per *process*, not per task
-    — FastAAI 1 reloaded models per task and a 16-way pool spent ~66 s parsing.
+    A `ModelSet` holds pyhmmer objects and cannot be pickled, so it is rebuilt
+    from its spec here rather than sent. Once per worker, before any task: the
+    per-genome cost of having models available is then zero.
     """
+    global _WORKER_MODELS
+    _WORKER_MODELS = _models(spec)
+
+
+def _worker_models() -> ModelSet:
     global _WORKER_MODELS
     try:
         return _WORKER_MODELS
-    except NameError:
-        _WORKER_MODELS = _models(spec)
+    except NameError:  # a direct call, outside any pool
+        _WORKER_MODELS = _models(None)
         return _WORKER_MODELS
 
 
@@ -152,8 +167,8 @@ def protein_to_hmm(protein, out_dir, models=None, *, compress: bool = False,
     depends on the best-hit filter, and storing the raw table means the filter
     can be changed later without searching again.
     """
-    spec = models.spec if isinstance(models, ModelSet) else models
-    return Path(_hmm_unit((os.fspath(protein), os.fspath(out_dir), spec, compress,
+    _init_models(models.spec if isinstance(models, ModelSet) else models)
+    return Path(_hmm_unit((os.fspath(protein), os.fspath(out_dir), compress,
                            name or genome_name(protein), cpus)))
 
 
@@ -162,9 +177,10 @@ def proteins_to_hmms(proteins: Iterable, out_dir, models=None, *,
                      cpus: int = 1) -> list[Path]:
     """`protein_to_hmm` over many, in parallel. Returns paths in input order."""
     spec = models.spec if isinstance(models, ModelSet) else models
-    work = [(os.fspath(p), os.fspath(out_dir), spec, compress, genome_name(p), cpus)
+    work = [(os.fspath(p), os.fspath(out_dir), compress, genome_name(p), cpus)
             for p in proteins]
-    return [Path(p) for p in _run(_hmm_unit, work, processes)]
+    return [Path(p) for p in _run(_hmm_unit, work, processes,
+                                  initializer=_init_models, initargs=(spec,))]
 
 
 def read_hit_table(path) -> tuple[str | None, list[Hit]]:
@@ -245,6 +261,9 @@ def prot_hmm_to_crystal(pairs: Iterable[tuple], out_dir, models=None, *,
     through the parsing that dominates, so threads come out *slower* than
     serial. Default 1, so a job never oversubscribes its allocation.
     """
+    # Only the fingerprint reaches a worker, not the model set: this step reads
+    # hit tables that already name their accessions, so no HMM is consulted and
+    # there is nothing per-process to build.
     ms = _models(models)
     work = [(os.fspath(a), os.fspath(b), os.fspath(out_dir), ms.fingerprint,
              filter_mode, compress) for a, b in ((p[0], p[1]) for p in pairs)]

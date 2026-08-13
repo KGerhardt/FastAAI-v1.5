@@ -513,7 +513,7 @@ unverifiable rather than treated as a conflict.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 262 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 263 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.
