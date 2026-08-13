@@ -70,7 +70,104 @@ pipeline parallelises across genomes, so `cpus=1` is the figure that composes):
 
 At 2,943 genomes that is roughly two CPU-hours of preprocessing against 1.6 s of
 search. The speedup above is what you get on a database you already built —
-which is the case FastAAI exists for. Build once, `--archive`, and query forever.
+which is the case FastAAI exists for. Build once, keep the intermediates, and
+query forever.
+
+## Preprocessing, and the three ranks it stores
+
+Because preprocessing is ~98% of a cold run, what gets kept between runs matters
+more than what gets computed. Every stage writes something reusable, and each
+rank is smaller than the one before it.
+
+One worker handles one genome; the pool runs `--preprocess-threads` of them at
+once. Both C libraries release the GIL, so this scales on threads rather than
+processes — FastAAI 1 forked, and every worker reloaded the model set.
+
+Everything a run produces lands under one root — `FastAAI/` in the working
+directory, or wherever `--dir` says. Nothing is discarded and nothing is written
+outside it: an HPC job is handed a directory and is expected to stay in it, so
+there are no temporary directories anywhere in this codebase.
+
+```text
+  genome.fna.gz  (yours, named however you like)
+       │
+       │  pyrodigal ····································   1.79 s   64%
+       ▼
+   every protein ─────────────────►  <root>/proteins/<genome>.fasta
+       │
+       │  pyhmmer ······································   1.03 s   36%
+       ▼
+   every raw hit ─────────────────►  <root>/hmm_hits/<genome>.tsv
+       │
+       │  best-hit filter ······························    ~0 s
+       ▼
+   the SCPs that won ─────────────►  <root>/crystals/<genome>.crystal.fasta
+       │
+       │  then Rust, once, over the whole crystal set
+       ▼
+   k-merise, invert, partition ───►  <root>/database/<name>/
+                                     5 s for 2,943 genomes
+
+   a search adds ─────────────────►  <root>/results/block_qNNNNN_tNNNNN.tsv
+```
+
+One file per genome per rank, in standard formats. No tar, no single table
+covering the collection, no nesting past that one level — a directory of
+per-genome files can be listed, subsetted and inspected with ordinary tools, and
+one genome can be deleted or re-run without touching another. Files are plain
+text unless `--gzip` is given, which gzips each one as it is written; every
+reader here accepts either.
+
+Each rank is a place to re-enter the pipeline, which is the point of storing
+them:
+
+| start from | skips | per genome |
+|---|---|---|
+| genomes | nothing | ~2.8 s |
+| proteins (`--input protein`) | prediction | ~1.0 s |
+| stored proteins + hits | prediction and search | re-resolve only |
+| crystals | everything | **~1.7 ms** |
+
+| rank | per genome | 2,943 Firmicutes | survives a change of |
+|---|---|---|---|
+| proteins + raw hits | 543 KB | 1.7 GB | model set, filter — anything |
+| crystals | 9.6 KB | 29 MB | nothing, but rebuilds in 5 s |
+| the database itself | — | 117 MB | (the built artifact) |
+
+**Crystals are the resolved SCPs** — one FASTA per genome holding just
+the marker proteins that won their accession, each record labelled with the
+genome, the originating gene call, the model-set fingerprint and the filter that
+produced it. FastAAI 1 called these crystals and they work the same way here.
+
+They are also *how* a database gets built. Each preprocessing worker writes its
+own crystal and the build reads them back — one ingestion path rather than two.
+Peak memory stops tracking the size of the collection as a result: a worker
+drops a genome's sequences once its crystal is written, and the build streams
+them one file at a time.
+
+```sh
+fastaai build genomes/ -d firm            # crystals written to FastAAI/crystals/
+fastaai crystallize old_run/              # or from proteins and hits you already have
+fastaai build FastAAI/crystals -d firm    # rebuild, no prediction or search
+```
+
+Measured on the 2,943 Firmicutes: crystallising a preprocessed collection gives
+35 MB, and rebuilding a sealed 116 MB database from it takes **5 s** — against
+roughly two CPU-hours to preprocess the same genomes. All 8,661,250 pairs agree
+with the database built directly from the stored hits.
+
+They are the smallest of the three artifacts — **smaller than the database built
+from them** — which makes them what you ship, and they carry no ordering of
+their own, so any subset builds a database comparable with any other subset from
+the same models. Accession *names* are stored, not positions; positions are
+assigned at build time from the model set, and a build refuses crystals whose
+fingerprint disagrees with it.
+
+This is also the answer to growing a database. There is no incremental append:
+adding genomes to a sealed database would fragment it into one-genome partitions
+and cost roughly 90× search throughput, so instead you keep crystals and rebuild
+when you are ready. A rebuild of 48 genomes takes 0.75 s against 46 s to
+preprocess them.
 
 ## Agreement with FastAAI 1
 
@@ -90,6 +187,95 @@ v1 and v1.5 differ in one respect that reaches the k-mers: v1 admits the stop
 symbol `*` and ambiguous residues `X`, v1.5 does not. See
 **[`fastaai2/methods/`](fastaai2/methods/)** for the data and the harness.
 
+## What changed: the data store
+
+Same numbers, different container. v1 kept a database in one SQLite file,
+storing both directions of the k-mer mapping for every accession:
+
+```text
+FastAAI 1                                   one SQLite file
+fastaai.db
+├─ genome_index                             name → id, protein count
+├─ genome_acc_kmer_counts                   (genome, accession) → count
+├─ PF00380                    ── inverted   kmer   → genomes[]
+├─ PF00380_genomes            ── forward    genome → kmers[]
+├─ PF00410  /  PF00410_genomes
+└─ …                                        2 tables per accession,
+                                            244 tables for 122 SCPs
+
+adding genomes:  INSERT … ON CONFLICT DO UPDATE SET genomes = genomes || (?)
+                 read-modify-write of every posting list the genome touches
+```
+
+v1.5 keeps a directory, stores only the inverted direction, and cuts it into
+partitions that are independent of one another:
+
+```text
+FastAAI 1.5                                 a directory
+db/
+├─ schema                                   k, alphabet, ordered accessions,
+│                                           filter mode, model fingerprint
+├─ manifest                                 genome → ordinal, partition,
+│                                           local id, hash, name
+├─ part.00000  ┐                            CSR per accession, direct-addressed
+├─ part.00001  │  inverted index only       by k-mer id:
+└─ part.NNNNN  ┘                            offsets[kmer]..offsets[kmer+1]
+                                            slices postings
+                                            ≤16,384 genomes, u16 local ids,
+                                            sorted ascending
+
+adding genomes:  write one new part file, rewrite the manifest
+                 no existing partition is read, no posting list renumbered
+```
+
+| | FastAAI 1 | FastAAI 1.5 |
+|---|---|---|
+| directions stored | forward and inverted | inverted only — ~34 GB rather than ~95 GB at GTDB scale |
+| genome ids | global | local to a partition, `u16` |
+| cost of adding genomes | scales with the database | scales with the addition |
+| resident while working | the database | one partition |
+
+The forward tables exist only to build the inverted ones, and the k-mer join
+reads both sides as inverted indexes, so nothing ever reads them back. Local ids
+are what make a merge manifest-only: a posting list means nothing outside its
+own partition, so partitions are never rewritten when databases combine.
+
+## What changed: the output
+
+v1 assembled the whole result in memory and wrote one TSV or one matrix. That is
+the part that stops being representable first — 200k × 200k species is 40
+billion cells, before any of it reaches disk.
+
+v1.5 writes one file per (query partition × target partition) block:
+
+```text
+                     target partitions
+                 t00000     t00001     t00002
+               ┌──────────┬──────────┬──────────┐
+        q00000 │   file   │   file   │   file   │
+               ├──────────┼──────────┼──────────┤
+        q00001 │   file   │   file   │   file   │   ← query partitions
+               ├──────────┼──────────┼──────────┤
+        q00002 │   file   │   file   │   file   │
+               └──────────┴──────────┴──────────┘
+
+  out/
+  ├─ block_q00000_t00000.tsv
+  ├─ block_q00000_t00001.tsv
+  ├─ …
+  └─ block_q00002_t00002.tsv
+
+  A cell is bounded by the partition size, not by the size of either
+  database. Nothing in it reaches outside its own two partitions, so
+  cells compute in any order on any machine, a crash costs one cell,
+  and a self-comparison computes only the upper triangle.
+```
+
+The same property makes growth incremental: adding genomes adds a row and a
+column to the grid, and only those cells need computing. A search whose two
+sides each fit one partition is simply the 1×1 case and lands in a single file,
+so `-o aai.tsv` behaves the way it always did.
+
 ## Install
 
 ```sh
@@ -100,15 +286,22 @@ maturin develop --release      # or: pip install .
 ## Use
 
 ```sh
-# build a database — uses the bundled 122-SCP set
-fastaai build /path/to/genomes -d db/ --archive arch/
+# build a database — bundled 122-SCP set, everything kept under FastAAI/
+fastaai build /path/to/genomes -d firm
+
+# put the run somewhere else, and gzip every file it writes
+fastaai build /path/to/genomes -d firm --dir /scratch/run17 --gzip
 
 # query it — against itself, or against another database
-fastaai query -q db/ -o aai.tsv
-fastaai query -q queries/ -t db/ -o aai.tsv
+fastaai query -q FastAAI/database/firm                 # -> FastAAI/results/
+fastaai query -q queries/ -t FastAAI/database/firm -o aai.tsv
+fastaai query -q FastAAI/database/firm -o -            # -> stdout
 
-# any other SCP set works; --hmm overrides the default
-fastaai build /path/to/genomes --hmm gtdb_bac120.hmm -d gtdb_db/
+# any other SCP set works; --hmm takes a file
+fastaai build /path/to/genomes --hmm my_markers.hmm -d custom
+
+# or one of the packaged sets, by name
+fastaai build /path/to/genomes --hmm gtdb-bact -d gtdb
 ```
 
 **The 122 SCPs FastAAI 1 shipped are bundled and used by default**, so an install
@@ -117,11 +310,30 @@ any HMM file, plain or gzipped, and the accession list, index and output all
 follow from it. Every database records which model set built it, so defaults and
 overrides cannot be mixed by accident.
 
-Results are written one block per query/target partition pair. A search whose
-two sides each fit a single partition is the 1×1 case and lands in one file, so
-`-o aai.tsv` behaves as expected; a larger search needs `-o` to name a directory
-to receive the blocks. The full matrix is never held, which is what makes an
-all-vs-all at GTDB scale expressible — 200k × 200k species is 40 billion pairs.
+GTDB's marker sets are packaged too, reachable by name because a file inside
+site-packages is not a path anyone wants to type:
+
+| `--hmm` | models | |
+|---|---|---|
+| *(omitted)* | 122 | FastAAI 1's SCPs — the default |
+| `gtdb-bact` | 120 | GTDB bac120, bacteria |
+| `gtdb-arch` | 53 | GTDB ar53, archaea |
+| `gtdb-all` | 168 | the union of both — they share 5 markers, so this is not 173 |
+
+Case and underscores are interchangeable (`GTDB_BACT` works). These are
+assembled from Pfam and TIGRFAM rather than copied from GTDB-Tk, and the pinned
+Pfam versions have since moved on, so they benchmark the engine but **do not
+reproduce GTDB's trees** — see `python/fastaai/data/README.md`.
+
+On 2,943 genomes scored against GTDB R232 taxonomy, retrieval is saturated for
+all three: same-genus top-1 is 99.04% for the default set, 99.16% for bac120 and
+98.79% for ar53 — the last on the seven of 53 archaeal markers a bacterium
+carries. There is no accuracy reason to switch; the reason is shared
+preprocessing with GTDB-Tk, whose identify step already runs these searches.
+
+Results are written one block per query/target partition pair, so a search
+spanning more than one pair needs `-o` to name a directory rather than a file —
+see [what changed: the output](#what-changed-the-output).
 
 ## Output format
 
