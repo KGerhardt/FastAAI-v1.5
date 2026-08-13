@@ -284,6 +284,15 @@ class SearchResult:
     #: with tight agreement across markers is a different claim from the same
     #: mean carried by two markers at 0.9 and the rest near 0.02.
     stdev: np.ndarray | None = None
+    #: Accessions carried by each genome. `poss_shared_SCPs` is the smaller of
+    #: the two: a pair cannot share more markers than the poorer genome has.
+    #: Carried so this object can write the v1 table; the engine's own writer
+    #: computes the same thing per block.
+    query_scps: list[int] | None = None
+    target_scps: list[int] | None = None
+    #: True when a database was searched against itself, where the diagonal is
+    #: a genome against itself. Identity there is given, not estimated.
+    selfcmp: bool = False
 
     @property
     def aai(self) -> np.ndarray:
@@ -369,28 +378,50 @@ class SearchResult:
                             int(shared[qi, ti]))
 
     def to_tsv(self, path, *, include_self: bool = True) -> "os.PathLike | str":
-        """Write these values as a table. **This is not FastAAI 1's TSV.**
+        """Write FastAAI 1's TSV — same columns, same names, same order.
 
-        It is the numbers this object holds, with its own column names to make
-        the difference visible. The v1-compatible table has two columns that are
-        not here — `jacc_SD` and `poss_shared_SCPs` — and applies a reporting
-        band that reports a self-pair as 100 and anything above 90 as `>90%`.
-        That band and its rounding live in Rust (`report.rs`) with their own
-        tests, so reproducing them here would be a second implementation to keep
-        in step, and the numbers would drift the first time one changed.
+        The band and the rounding are not reimplemented here: `_core.aai_label`
+        and `_core.py_round` are the engine's own, exposed so this and the
+        streaming writer cannot drift. Verified byte-for-byte against
+        `Database.write_block`.
 
-        For the v1 table, let the engine write it: `fastaai query`, or
-        `Database.write_block`, which is what the CLI calls.
-
-        `aai` here is the uncensored fit, so a self-pair reads as its
-        extrapolated value rather than 100.
+        For a result already in memory. A search too large to hold writes its
+        blocks straight from Rust instead — see `cli.write_blocks`.
         """
+        if self.query_scps is None or self.target_scps is None:
+            raise RuntimeError(
+                "this result carries no SCP counts, so poss_shared_SCPs cannot "
+                "be written; it was not produced by `search`"
+            )
+        na = _core.NO_HIT
+        jac, shared = self.jaccard, np.asarray(self.shared)
+        sd = self.stdev
         with open(path, "w") as fh:
-            fh.write("query\ttarget\tjaccard\tshared\taai\n")
-            for h in self.rows(include_self=include_self):
-                j = "" if not np.isfinite(h.jaccard) else f"{h.jaccard:.6f}"
-                a = "" if not np.isfinite(h.aai) else f"{h.aai:.4f}"
-                fh.write(f"{h.query}\t{h.target}\t{j}\t{h.shared}\t{a}\n")
+            fh.write("query\ttarget\tavg_jacc_sim\tjacc_SD\tnum_shared_SCPs"
+                     "\tposs_shared_SCPs\tAAI_estimate\n")
+            for qi, q in enumerate(self.query_names):
+                for ti, t in enumerate(self.target_names):
+                    if not include_self and self._self_pair(qi, ti):
+                        continue
+                    s, j = int(shared[qi, ti]), float(jac[qi, ti])
+                    # v1 blanks every value column when a pair shares no
+                    # accession: there is no measurement, not a measurement of
+                    # zero.
+                    if s == 0:
+                        fh.write(f"{q}\t{t}\t{na}\t{na}\t{na}\t{na}\t{na}\n")
+                        continue
+                    jtxt = na if not np.isfinite(j) else _core.py_round(j, 4)
+                    sdtxt = na
+                    if sd is not None and np.isfinite(sd[qi, ti]):
+                        sdtxt = _core.py_round(float(sd[qi, ti]), 4)
+                    poss = min(self.query_scps[qi], self.target_scps[ti])
+                    if self.selfcmp and qi == ti:
+                        # Identity is given by the comparison, not inferred from
+                        # it; the regression is not consulted.
+                        aai = _core.py_round(_core.SELF_IDENTITY, 2)
+                    else:
+                        aai = _core.aai_label(_core.jaccard_to_aai(j), s, j)
+                    fh.write(f"{q}\t{t}\t{jtxt}\t{sdtxt}\t{s}\t{poss}\t{aai}\n")
         return path
 
 
@@ -418,4 +449,10 @@ def search(
     jac = np.frombuffer(jb, dtype=np.float64).reshape(nq, nt)
     sh = np.frombuffer(sb, dtype=np.uint32).reshape(nq, nt)
     sd = np.frombuffer(qb, dtype=np.float64).reshape(nq, nt) if qb is not None else None
-    return SearchResult(query.genome_names, target.genome_names, jac, sh, sd)
+    # Carried so the result can write the v1 table. One extra pass over the
+    # partitions against an N-squared search, and it is what stops the table
+    # from having a second implementation.
+    qc = query.scp_counts()
+    tc = qc if target is query else target.scp_counts()
+    return SearchResult(query.genome_names, target.genome_names, jac, sh, sd,
+                        list(qc), list(tc), target is query)

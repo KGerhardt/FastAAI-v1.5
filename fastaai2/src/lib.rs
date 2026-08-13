@@ -1136,6 +1136,29 @@ fn build_from_crystals(
     Ok(db)
 }
 
+/// FastAAI 1's AAI cell: a rounded number, or one of its categorical labels.
+///
+/// Exposed so Python can write the v1 table without a second implementation of
+/// the band. The precedence here is load-bearing — no measurement outranks the
+/// floor, which outranks the ceiling — and duplicating it would mean two
+/// versions to keep in step.
+#[pyfunction]
+fn aai_label(aai: f64, shared: u32, jac: f64) -> String {
+    let mut out = String::new();
+    report::aai_label(&mut out, aai, shared, jac);
+    out
+}
+
+/// `str(numpy.round(v, dp))`, which is how every number in the v1 table is
+/// rendered. Reimplemented in Rust rather than approximated, and shared with
+/// Python for the same reason as `aai_label`.
+#[pyfunction]
+fn py_round(v: f64, dp: i32) -> String {
+    let mut out = String::new();
+    report::fmt_py_round(&mut out, v, dp);
+    out
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Database>()?;
@@ -1145,8 +1168,12 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compare_pair, m)?)?;
     m.add_function(wrap_pyfunction!(open_database, m)?)?;
     m.add_function(wrap_pyfunction!(build_from_crystals, m)?)?;
+    m.add_function(wrap_pyfunction!(aai_label, m)?)?;
+    m.add_function(wrap_pyfunction!(py_round, m)?)?;
     m.add("DEFAULT_ALPHABET", kmer::DEFAULT_ALPHABET)?;
     m.add("DEFAULT_K", kmer::DEFAULT_K)?;
     m.add("MAX_PARTITION", index::MAX_PARTITION)?;
+    m.add("NO_HIT", report::NO_HIT)?;
+    m.add("SELF_IDENTITY", report::SELF_IDENTITY)?;
     Ok(())
 }

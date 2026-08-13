@@ -421,11 +421,12 @@ neighbour: `hits_for` and `best_hit` skip it unless you pass
 `include_self=True`. Pairs sharing no marker are dropped rather than reported as
 zero — no shared marker is an absence of evidence, not evidence of distance.
 
-`res.to_tsv()` writes what the object holds, under its own column names. It is
-deliberately *not* the v1 table: that one carries `jacc_SD` and
-`poss_shared_SCPs` and applies a reporting band (a self-pair reads 100, anything
-over 90 reads `>90%`) which lives in Rust with its own tests. For the v1 table,
-let the engine write it — `fastaai query`, or `Database.write_block`.
+`res.to_tsv(path)` writes FastAAI 1's table — same columns, same names, same
+order. The band and the rounding are the engine's own, exposed rather than
+reimplemented, and the output is asserted byte-for-byte against
+`Database.write_block`; two writers for one format is how the two drift. A
+search too large to hold in memory writes its blocks straight from Rust
+instead.
 
 Or one step at a time. Each takes and returns **paths**, so a step can be run
 for a thousand genomes across a cluster and the results gathered afterwards;
@@ -485,7 +486,7 @@ unverifiable rather than treated as a conflict.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 246 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 250 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.

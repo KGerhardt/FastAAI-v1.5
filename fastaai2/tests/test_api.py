@@ -182,15 +182,58 @@ def test_rows_covers_the_matrix(tmp_path):
     assert sum(1 for _ in res.rows()) == n
 
 
-def test_to_tsv_does_not_claim_to_be_the_v1_table(tmp_path):
-    """It has its own column names on purpose — the v1 table carries two more
-    columns and a reporting band that lives in Rust."""
+@pytest.mark.parametrize("stdev", [False, True])
+def test_to_tsv_matches_the_engine_byte_for_byte(tmp_path, stdev):
+    """Two writers for one format is how the two drift.
+
+    The band, the rounding and the self-pair rule are the engine's own
+    (`_core.aai_label`, `_core.py_round`, `_core.SELF_IDENTITY`), so this asserts
+    the Python path and the streaming Rust path produce the same bytes rather
+    than merely the same numbers.
+    """
+    prots = [_protein_file(tmp_path, f"t{i}") for i in range(3)]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "tt"),
+                            save=False, threads=2)
+    res = fastaai.search(db, db, threads=1, stdev=stdev)
+
+    mine = tmp_path / f"py_{stdev}.tsv"
+    theirs = tmp_path / f"rust_{stdev}.tsv"
+    res.to_tsv(mine)
+    db.write_block(db, 0, 0, str(theirs), 128, 1, stdev, "both", "tsv")
+    assert mine.read_text() == theirs.read_text()
+
+
+def test_to_tsv_has_v1s_columns(tmp_path):
     db, res = _tiny_result(tmp_path)
     out = tmp_path / "r.tsv"
     res.to_tsv(out)
-    header = out.read_text().splitlines()[0]
-    assert header == "query\ttarget\tjaccard\tshared\taai"
-    assert "avg_jacc_sim" not in header and "poss_shared_SCPs" not in header
+    assert out.read_text().splitlines()[0] == (
+        "query\ttarget\tavg_jacc_sim\tjacc_SD\tnum_shared_SCPs"
+        "\tposs_shared_SCPs\tAAI_estimate")
+
+
+def test_a_self_pair_reports_as_identity_not_an_estimate(tmp_path):
+    """The regression is unbounded above, so feeding it a self-comparison
+    returns something past 100 that then reads as `>90%`."""
+    db, res = _tiny_result(tmp_path)
+    out = tmp_path / "self.tsv"
+    res.to_tsv(out)
+    q = res.query_names[0]
+    row = next(ln for ln in out.read_text().splitlines()
+               if ln.startswith(f"{q}\t{q}\t"))
+    assert row.endswith("\t100.0")
+
+
+def test_poss_shared_is_the_poorer_genome(tmp_path):
+    db, res = _tiny_result(tmp_path)
+    counts = dict(zip(res.query_names, res.query_scps))
+    out = tmp_path / "p.tsv"
+    res.to_tsv(out)
+    for ln in out.read_text().splitlines()[1:]:
+        f = ln.split("\t")
+        if f[5] == "N/A":
+            continue
+        assert int(f[5]) == min(counts[f[0]], counts[f[1]])
 
 
 @pytest.mark.parametrize("spec", [None, "gtdb-bact", "GTDB_ARCH"])
