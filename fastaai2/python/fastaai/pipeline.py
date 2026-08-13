@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (ProcessPoolExecutor, ThreadPoolExecutor,
+                                as_completed)
 from dataclasses import dataclass
 from typing import Callable, Iterable, NamedTuple
 
@@ -208,9 +209,40 @@ def build_from_crystals_paths(
     return db
 
 
+def _crystallize_one(args) -> int:
+    """One genome, p+h -> crystal. Module level and taking plain values so it
+    can be sent to a worker process; a closure over a `ModelSet` could not be
+    pickled, and does not need to be — only the fingerprint string is used."""
+    import pyfastx
+
+    from . import crystal, layout
+    from .archive import read_hits_for
+
+    root, genome, out, fingerprint, mode, compress = args
+    path = layout.find(os.path.join(root, layout.PROTEINS), layout.safe(genome),
+                       layout.FASTA_EXT)
+    if path is None:
+        return 0
+    assignment = resolve_hits(read_hits_for(root, genome), mode)
+    if not assignment:
+        return 0
+    wanted = set(assignment)
+
+    scps: dict[str, str] = {}
+    origins: dict[str, str] = {}
+    for name, seq in pyfastx.Fastx(str(path)):
+        if name in wanted:
+            acc = assignment[name]
+            scps[acc] = seq
+            origins[acc] = name
+
+    return 1 if crystal.write(out, genome, scps, fingerprint, mode, None,
+                              origins, compress) else 0
+
+
 def crystallize_archive(root, out, models: ModelSet,
                         mode: FilterMode = DEFAULT_FILTER,
-                        compress: bool = False) -> int:
+                        compress: bool = False, processes: int = 1) -> int:
     """Turn stored proteins and hits into crystals — the one operator between
     those ranks.
 
@@ -223,40 +255,37 @@ def crystallize_archive(root, out, models: ModelSet,
     builds an index and can leave `.fxi` sidecars beside read-only data. Only
     the winning proteins are retained, so a genome costs its SCPs rather than
     its whole proteome; the previous version read every protein into a dict
-    first.
-    """
-    import pyfastx
+    first, which is what used to make this the slow step.
 
-    from . import crystal, layout
-    from .archive import genome_names, read_fingerprint, read_hits_for
+    **Parallelise with processes, not threads.** Each genome is independent and
+    writes its own file, so the work is embarrassingly parallel — but pyfastx
+    holds the GIL through the parsing that dominates, so threads serialise on it
+    and pay scheduling overhead on top. Measured over 1,500 units:
+
+                        serial    threads x8    processes x8
+        local, plain     1320       859 (0.65x)   6966 (5.28x)
+        local, gzipped    196       176 (0.90x)   1230 (6.29x)
+
+    Default is 1 so a job never oversubscribes the cores it was allocated.
+    Raise it and it scales: the 2,943-genome Firmicutes collection takes 19 s
+    serial from gzipped files, ~3 s at 8 processes.
+    """
+    from . import layout
+    from .archive import genome_names, read_fingerprint
 
     fingerprint = read_fingerprint(root) or models.fingerprint
     prot_dir = os.path.join(os.fspath(root), layout.PROTEINS)
-    n = 0
 
     # Driven by the hit files, which carry each genome's true name. Deriving it
     # from a filename would silently rename any genome `layout.safe` rewrote.
-    for genome in genome_names(root):
-        path = layout.find(prot_dir, layout.safe(genome), layout.FASTA_EXT)
-        if path is None:
-            continue
-        assignment = resolve_hits(read_hits_for(root, genome), mode)
-        if not assignment:
-            continue
-        wanted = set(assignment)
-
-        scps: dict[str, str] = {}
-        origins: dict[str, str] = {}
-        for name, seq in pyfastx.Fastx(str(path)):
-            if name in wanted:
-                acc = assignment[name]
-                scps[acc] = seq
-                origins[acc] = name
-
-        if crystal.write(out, genome, scps, fingerprint, mode, None, origins,
-                         compress):
-            n += 1
-    return n
+    names = genome_names(root)
+    work = [(os.fspath(root), g, os.fspath(out), fingerprint, mode, compress)
+            for g in names]
+    if processes <= 1:
+        return sum(_crystallize_one(w) for w in work)
+    # Chunked because the per-item cost is milliseconds and the dispatch is not.
+    with ProcessPoolExecutor(max_workers=processes) as pool:
+        return sum(pool.map(_crystallize_one, work, chunksize=16))
 
 
 def _select(spec, names: list[str]) -> list[int]:

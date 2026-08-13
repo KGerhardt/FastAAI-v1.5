@@ -114,9 +114,34 @@ def read_hit_table(path) -> tuple[str | None, list[Hit]]:
     return genome, hits
 
 
+def _pair_to_crystal(args):
+    """One `(protein, hmm)` pair. Module level and taking plain values so a
+    worker process can receive it."""
+    import pyfastx
+
+    protein_path, hmm_path, out_dir, fingerprint, filter_mode, compress = args
+    named, hits = read_hit_table(hmm_path)
+    name = named or genome_name(protein_path)
+    assignment = resolve_hits(hits, filter_mode)
+    if not assignment:
+        return None
+    wanted = set(assignment)
+
+    scps, origins = {}, {}
+    for prot, seq in pyfastx.Fastx(str(protein_path)):
+        if prot in wanted:
+            acc = assignment[prot]
+            scps[acc] = seq
+            origins[acc] = prot
+
+    path = _crystal.write(out_dir, name, scps, fingerprint, filter_mode, None,
+                          origins, compress)
+    return None if path is None else os.fspath(path)
+
+
 def prot_hmm_to_crystal(pairs: Iterable[tuple], out_dir, models=None, *,
                         filter_mode: FilterMode = DEFAULT_FILTER,
-                        compress: bool = False) -> list[Path]:
+                        compress: bool = False, processes: int = 1) -> list[Path]:
     """Resolve `(protein_path, hmm_path)` pairs into crystals.
 
     The cheap step: everything expensive already happened. Read the hits, take
@@ -125,32 +150,22 @@ def prot_hmm_to_crystal(pairs: Iterable[tuple], out_dir, models=None, *,
     whole proteome.
 
     Returns the crystals written, skipping any genome that recovered nothing.
+
+    Pairs are independent and each writes its own file, so this scales with
+    `processes` — measured 5-6x at 8. Not with threads: pyfastx holds the GIL
+    through the parsing that dominates, so threads come out *slower* than
+    serial. Default 1, so a job never oversubscribes its allocation.
     """
-    import pyfastx
-
     ms = _models(models)
-    written = []
-    for pair in pairs:
-        protein_path, hmm_path = pair[0], pair[1]
-        named, hits = read_hit_table(hmm_path)
-        name = named or genome_name(protein_path)
-        assignment = resolve_hits(hits, filter_mode)
-        if not assignment:
-            continue
-        wanted = set(assignment)
-
-        scps, origins = {}, {}
-        for prot, seq in pyfastx.Fastx(str(protein_path)):
-            if prot in wanted:
-                acc = assignment[prot]
-                scps[acc] = seq
-                origins[acc] = prot
-
-        path = _crystal.write(out_dir, name, scps, ms.fingerprint, filter_mode,
-                              None, origins, compress)
-        if path is not None:
-            written.append(path)
-    return written
+    work = [(os.fspath(a), os.fspath(b), os.fspath(out_dir), ms.fingerprint,
+             filter_mode, compress) for a, b in ((p[0], p[1]) for p in pairs)]
+    if processes <= 1:
+        out = [_pair_to_crystal(w) for w in work]
+    else:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=processes) as pool:
+            out = list(pool.map(_pair_to_crystal, work, chunksize=16))
+    return [Path(p) for p in out if p is not None]
 
 
 def build_database(crystals, models=None, *, k: int | None = None,

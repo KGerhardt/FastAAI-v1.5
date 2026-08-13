@@ -310,6 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="models the archive was searched with (default: bundled)")
     c.add_argument("--filter", choices=("v1", "v1_alt", "rbh"), default=DEFAULT_FILTER,
                    help="best-hit resolution to bake into the crystals")
+    c.add_argument("--processes", type=int, default=1,
+                   help="worker processes; scales 5-6x at 8. Processes, not "
+                        "threads: pyfastx holds the GIL (default 1)")
     c.add_argument("--quiet", action="store_true")
 
     return p
@@ -405,7 +408,7 @@ def cmd_crystallize(args) -> int:
     _describe_models(models, args.hmm, log)
     out = args.output or (Path(args.source) / layout.CRYSTALS)
     n = crystallize_archive(args.source, out, models, mode=args.filter,
-                            compress=args.compress)
+                            compress=args.compress, processes=args.processes)
     log(f"wrote {n} crystals to {out}")
     log(f"  build from them with: fastaai build {out}")
     return 0

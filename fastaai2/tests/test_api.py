@@ -316,3 +316,20 @@ def test_min_shared_frac_needs_the_counts(tmp_path):
     res.query_scps = None
     with pytest.raises(RuntimeError, match="min_shared_frac"):
         list(res(min_shared_frac=0.5))
+
+
+# --- parallel crystallising ---------------------------------------------------
+
+def test_processes_give_identical_crystals(tmp_path):
+    """Genomes are independent and write their own files, so the only thing to
+    guard is that going wide changes nothing but the wall clock."""
+    prots = [_protein_file(tmp_path, f"w{i}") for i in range(6)]
+    hmms = [fastaai.protein_to_hmm(p, tmp_path / "hh") for p in prots]
+    pairs = list(zip(prots, hmms))
+
+    serial = fastaai.prot_hmm_to_crystal(pairs, tmp_path / "s", processes=1)
+    wide = fastaai.prot_hmm_to_crystal(pairs, tmp_path / "p", processes=4)
+
+    assert [p.name for p in serial] == [p.name for p in wide]
+    for a, b in zip(sorted(serial), sorted(wide)):
+        assert a.read_text() == b.read_text()
