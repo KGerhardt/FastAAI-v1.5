@@ -6,6 +6,8 @@ owns k-merisation, the inverted index, counting and the AAI transform.
 
 from . import _core
 from .ingest import find_genomes, genome_name, read_fasta
+from .reshape import per_genome as results_per_genome
+from .reshape import to_matrix as results_to_matrix
 from .api import (
     all_steps,
     build_database,
@@ -80,6 +82,8 @@ __all__ = [
     "protein_to_hmm",
     "proteins_to_hmms",
     "read_hit_table",
+    "results_per_genome",
+    "results_to_matrix",
     "read_fasta",
     "search",
     "__version__",

@@ -9,6 +9,7 @@ plus two that compute nothing:
 
     fastaai crystallize   proteins + hits -> crystals
     fastaai inspect       a database -> readable text
+    fastaai reshape       block results -> v1's output shapes
 
 There is no merge. Combining sealed databases preserved each donor's
 partitioning, which fragments the index; putting crystals together and
@@ -305,6 +306,17 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--emit", choices=("aai", "jaccard", "both"), default="both")
     _common(q)
 
+    r = sub.add_parser("reshape",
+                       help="turn block results into v1's output shapes")
+    r.add_argument("results", help="results directory, or a single block file")
+    r.add_argument("--per-genome", metavar="DIR",
+                   help="write one TSV per query genome, that genome against "
+                        "everything")
+    r.add_argument("--matrix", metavar="FILE",
+                   help="write the AAI-only matrix")
+    r.add_argument("--gzip", dest="compress", action="store_true")
+    r.add_argument("--quiet", action="store_true")
+
     i = sub.add_parser("inspect",
                        help="write a database out as readable text")
     i.add_argument("database", help="database directory")
@@ -421,6 +433,27 @@ def cmd_query(args) -> int:
     log(f"search {kernel:.2f}s ({per_thread:,.0f} pairs/s/thread, "
         f"{args.threads} threads){tail}"
         f"{' [symmetric, upper triangle]' if same else ''}")
+    return 0
+
+
+def cmd_reshape(args) -> int:
+    """Block results back into the shapes v1 wrote."""
+    from . import reshape
+
+    log = _log(args.quiet)
+    if not args.per_genome and not args.matrix:
+        raise SystemExit("nothing to do: pass --per-genome DIR, --matrix FILE, "
+                         "or both")
+    blocks = reshape.block_files(args.results)
+    log(f"{args.results}: {len(blocks)} block file(s)")
+    if args.per_genome:
+        written = reshape.per_genome(args.results, args.per_genome,
+                                     compress=args.compress)
+        log(f"  {len(written)} per-genome TSVs in {args.per_genome}/")
+    if args.matrix:
+        dest = reshape.to_matrix(args.results, args.matrix,
+                                 compress=args.compress)
+        log(f"  matrix written to {dest}")
     return 0
 
 
@@ -578,7 +611,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"note: --{flag} no longer applies — {why}", file=sys.stderr)
     return {"build": cmd_build, "query": cmd_query,
             "crystallize": cmd_crystallize,
-            "inspect": cmd_inspect}[args.command](args)
+            "inspect": cmd_inspect,
+            "reshape": cmd_reshape}[args.command](args)
 
 
 if __name__ == "__main__":

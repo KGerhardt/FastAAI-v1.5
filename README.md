@@ -85,11 +85,15 @@ them:
 | stored proteins + hits | prediction and search | re-resolve only |
 | crystals | everything | **~1.7 ms** |
 
-| rank | per genome | 2,943 Firmicutes | survives a change of |
-|---|---|---|---|
-| proteins + raw hits | 543 KB | 1.7 GB | model set, filter - anything |
-| crystals | 9.6 KB | 29 MB | nothing, but rebuilds in 5 s |
-| the database itself | - | 117 MB | (the built artifact) |
+Measured over all 2,943 Firmicutes. Files are plain text unless `--gzip` is
+given, so both are shown:
+
+| rank | per genome | 2,943 Firmicutes | with `--gzip` | survives a change of |
+|---|---|---|---|---|
+| proteins | 1,074 KB | 3,237 MB | 1,794 MB | model set and filter - anything |
+| raw HMM hits | 3.4 KB | 10.1 MB | 2.8 MB | filter only; they name a model set |
+| crystals | 28.6 KB | 86.1 MB | 31.9 MB | nothing, but rebuilds in 5 s |
+| the database | 38.7 KB | 116.5 MB | 63.0 MB tar.gz | (the built artifact) |
 
 **Crystals are the resolved SCPs** - one FASTA per genome holding just
 the marker proteins that won their accession, each record labelled with the
@@ -404,7 +408,7 @@ and the intermediates read back off disk.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 274 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 279 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.

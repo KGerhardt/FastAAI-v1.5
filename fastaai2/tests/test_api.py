@@ -542,3 +542,94 @@ def test_an_absolute_database_path_escapes_the_root(tmp_path):
     fastaai.preprocess(proteins=prots, directory=str(tmp_path / "root2"),
                        database=str(elsewhere), processes=1)
     assert (elsewhere / "schema").exists()
+
+
+# --- reshaping block results --------------------------------------------------
+
+def _fake_blocks(tmp_path, nq=3, splits=((0, 2), (2, 5))):
+    """Hand-built blocks for one query partition over several target blocks.
+
+    A search large enough to produce a real grid needs >16,384 genomes, so the
+    interleaving is exercised on constructed files instead. The property under
+    test is ordering: a query's row must come out with its targets in block
+    order, not shuffled.
+    """
+    out = tmp_path / "blocks"
+    out.mkdir()
+    head = ("query\ttarget\tavg_jacc_sim\tjacc_SD\tnum_shared_SCPs"
+            "\tposs_shared_SCPs\tAAI_estimate")
+    for ti, (lo, hi) in enumerate(splits):
+        lines = [head]
+        for q in range(nq):
+            for t in range(lo, hi):
+                lines.append(f"q{q}\tt{t}\t0.1\tN/A\t50\t60\t{40 + t}.00")
+        (out / f"block_q00000_t{ti:05d}.tsv").write_text("\n".join(lines) + "\n")
+    return out
+
+
+def test_per_genome_gathers_a_query_across_its_target_blocks(tmp_path):
+    from fastaai import reshape
+
+    blocks = _fake_blocks(tmp_path)
+    written = reshape.per_genome(blocks, tmp_path / "pg")
+    assert len(written) == 3
+
+    rows = [l.split("\t") for l in
+            (tmp_path / "pg" / "q0.tsv").read_text().splitlines()[1:]]
+    assert [r[0] for r in rows] == ["q0"] * 5, "one genome per file"
+    assert [r[1] for r in rows] == ["t0", "t1", "t2", "t3", "t4"], \
+        "targets in block order, blocks in target-partition order"
+
+
+def test_matrix_from_blocks_spans_every_target_block(tmp_path):
+    from fastaai import reshape
+
+    blocks = _fake_blocks(tmp_path)
+    dest = reshape.to_matrix(blocks, tmp_path / "m.matrix")
+    lines = dest.read_text().splitlines()
+    assert lines[0].split("\t")[1:] == ["t0", "t1", "t2", "t3", "t4"]
+    assert len(lines) == 1 + 3
+    assert lines[1].split("\t")[0] == "q0"
+
+
+def test_matrix_maps_the_categorical_labels(tmp_path):
+    """A TSV cell can read `>90%`; a matrix cell holds a number, so v1's
+    sentinels are used. The mapping is the engine's, not a copy."""
+    from fastaai import reshape
+
+    out = tmp_path / "b"
+    out.mkdir()
+    head = ("query\ttarget\tavg_jacc_sim\tjacc_SD\tnum_shared_SCPs"
+            "\tposs_shared_SCPs\tAAI_estimate")
+    (out / "block_q00000_t00000.tsv").write_text(
+        head + "\nq0\tt0\t0.9\tN/A\t50\t60\t>90%\n"
+             + "q0\tt1\tN/A\tN/A\tN/A\tN/A\tN/A\n"
+             + "q0\tt2\t0.01\tN/A\t2\t60\t<30%\n")
+    cells = reshape.to_matrix(out, tmp_path / "m2").read_text().splitlines()[1].split("\t")
+    assert cells[1:] == ["95.0", "N/A", "15.0"]
+
+
+def test_reshape_rejects_a_non_result_file(tmp_path):
+    from fastaai import reshape
+
+    bad = tmp_path / "block_q00000_t00000.tsv"
+    bad.write_text("not\ta\tresult\n1\t2\t3\n")
+    with pytest.raises(ValueError, match="not a FastAAI result TSV"):
+        reshape.per_genome(bad, tmp_path / "out")
+
+
+def test_reshaped_matrix_matches_the_engines_own(tmp_path):
+    """Two ways to a matrix - the engine writing one directly, and reshaping its
+    TSV - must agree, or the label mapping has drifted."""
+    prots = [_protein_file(tmp_path, f"mm{i}") for i in range(3)]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "mmr"),
+                            save=False, processes=1)
+    from fastaai import reshape
+
+    native = tmp_path / "native.matrix"
+    tsv = tmp_path / "block_q00000_t00000.tsv"
+    db.write_block(db, 0, 0, str(native), 128, 1, False, "both", "matrix")
+    db.write_block(db, 0, 0, str(tsv), 128, 1, False, "both", "tsv")
+
+    reshaped = reshape.to_matrix(tsv, tmp_path / "reshaped.matrix")
+    assert reshaped.read_text() == native.read_text()

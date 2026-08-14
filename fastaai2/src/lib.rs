@@ -1433,6 +1433,24 @@ fn aai_label(aai: f64, shared: u32, jac: f64) -> String {
     out
 }
 
+/// A TSV's `AAI_estimate` cell as the matrix writes it.
+///
+/// The two formats disagree on purpose: a matrix cell holds a number, so the
+/// TSV's categorical labels carry v1's sentinel values there instead. Reshaping
+/// a TSV into a matrix has to apply the same mapping, and exposing it keeps that
+/// from becoming a second implementation that drifts.
+#[pyfunction]
+fn matrix_cell_from_label(label: &str) -> String {
+    let mut out = String::new();
+    match label {
+        report::NO_HIT => out.push_str(report::NO_HIT),
+        report::LABEL_BELOW => report::fmt_py_round(&mut out, report::MATRIX_BELOW, 1),
+        report::LABEL_ABOVE => report::fmt_py_round(&mut out, report::MATRIX_ABOVE, 1),
+        other => out.push_str(other),
+    }
+    out
+}
+
 /// `str(numpy.round(v, dp))`, which is how every number in the v1 table is
 /// rendered. Reimplemented in Rust rather than approximated, and shared with
 /// Python for the same reason as `aai_label`.
@@ -1454,6 +1472,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_from_crystals, m)?)?;
     m.add_function(wrap_pyfunction!(aai_label, m)?)?;
     m.add_function(wrap_pyfunction!(py_round, m)?)?;
+    m.add_function(wrap_pyfunction!(matrix_cell_from_label, m)?)?;
     m.add("DEFAULT_ALPHABET", kmer::DEFAULT_ALPHABET)?;
     m.add("DEFAULT_K", kmer::DEFAULT_K)?;
     m.add("MAX_PARTITION", index::MAX_PARTITION)?;

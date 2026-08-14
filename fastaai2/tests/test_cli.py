@@ -144,7 +144,8 @@ def test_parser_exposes_the_expected_verbs():
     replacement is to put crystals together and rebuild."""
     p = build_parser()
     sub = [a for a in p._actions if a.dest == "command"][0]
-    assert set(sub.choices) == {"build", "query", "crystallize", "inspect"}
+    assert set(sub.choices) == {"build", "query", "crystallize", "inspect",
+                                "reshape"}
 
 
 # --- AAI reporting band -------------------------------------------------------
