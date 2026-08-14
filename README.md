@@ -16,36 +16,312 @@ The search engine differences are (1) searches are partitioned to batches of no 
 
 Some additional conveniences have been added, primarily in the form of an API for Python. The API exposes a preprocessing workflow for genomes -> FastAAI database and search of database vs. database, plus some operators for interacting with FastAAI results. Slightly more granular equivalents of the preprocessing steps are also available.
 
-## Performance
+## Install
 
-**Search**, 8 threads. v1 was run through `db_query --in_memory --store_results`, its
-fastest path:
+```sh
+cd fastaai2
+maturin develop --release      # or: pip install .
+```
 
-This was done on my laptop, so don't use the numbers as a final estimate of performance. The point is that it's quite a bit faster than v1. Throughput is pairwise genome comparisons per second per thread.
+## Usage: CLI
 
-| scale | pairs | v1 | v1.5 | v1 /s/thread | v1.5 /s/thread |
-|---|---|---|---|---|---|
-| **2,943 genomes** | **8,661,249** | **21.84 s** | **1.587 s** | **49,572** | **682,203** |
+Two verbs do the work, and three more operate on what they left behind:
 
-Memory and disk at 2,943 genomes:
+```sh
+fastaai build   inputs                   # genomes or proteins -> a database
+fastaai query   -q database [-t other]   # database x database -> AAI
 
-| | v1 | v1.5 |
+fastaai crystallize  source              # stored proteins + hits -> crystals
+fastaai inspect      database            # a database -> readable text
+fastaai reshape      results             # block output -> v1's output shapes
+```
+
+With no options at all, a build and a self-search are two lines:
+
+```sh
+fastaai build /path/to/genomes
+fastaai query -q FastAAI/database
+```
+
+Everything they produce lands under one root, `FastAAI/` in the working
+directory. Nothing is discarded and nothing is written outside it:
+
+```text
+FastAAI/
+├─ proteins/<genome>.fasta            every gene call
+├─ hmm_hits/<genome>.tsv              every raw HMM hit
+├─ crystals/<genome>.crystal.fasta    the SCPs that won their accession
+├─ database/                          schema, manifest, part.00000 ...
+├─ results/                           block_q00000_t00000.tsv ...   (query adds this)
+├─ models.txt                         the accessions searched for, in order
+└─ models.sha256                      their fingerprint, which the database records too
+```
+
+`FastAAI/database` **is** the database - there is no name level beneath it - so
+that path is what you hand back to `query`. `--dir` moves the whole root
+somewhere else, and `-d` is only needed to keep more than one database under a
+single root.
+
+```sh
+# proteins rather than genomes; gene prediction is skipped
+fastaai build /path/to/proteins --input protein
+
+# another root, gzip every file written, 16 preprocessing workers
+fastaai build /path/to/genomes --dir /scratch/run17 --gzip --processes 16
+
+# a different marker set: an HMM file, or a packaged set by name
+fastaai build /path/to/genomes --hmm my_markers.hmm
+fastaai build /path/to/genomes --hmm gtdb-bact
+
+# rebuild straight from crystals - no prediction, no HMM search
+fastaai build FastAAI/crystals
+
+# two databases, and an explicit output path
+fastaai query -q FastAAI/database -t /scratch/run17/database -o aai.tsv
+fastaai query -q FastAAI/database -o -                    # to stdout
+fastaai query -q FastAAI/database --output_style matrix
+
+# resolve crystals from proteins and hits already on disk
+fastaai crystallize old_run/
+
+# the packed binary database, written back out as text
+fastaai inspect FastAAI/database
+
+# blocks back into the shapes v1 wrote
+fastaai reshape FastAAI/results --per-genome per_genome/ --matrix aai.matrix
+```
+
+### Options
+
+Both `build` and `query` take all of these, since `query` accepts raw sequences
+and will preprocess them the same way `build` does. The last two are search
+options and do nothing on a `build`:
+
+| flag | default | |
 |---|---|---|
-| peak RSS | 1.01 GB | 116 MB index |
-| database on disk | 508 MB | 116 MB |
+| `--hmm FILE\|SET` | the bundled 122-SCP set | an HMM file, plain or gzipped, or a packaged set by name |
+| `--dir DIR` | `FastAAI/` here | output root, created if needed |
+| `--gzip` | off | gzip each file as it is written |
+| `--processes N` | 4 | worker processes for preprocessing - prediction, HMM search, crystallising |
+| `--filter v1\|v1_alt\|rbh` | `v1` | best-hit resolution |
+| `--input auto\|genome\|protein` | `auto` | input type; `protein` skips gene prediction |
+| `--limit N` | all | use only the first N inputs |
+| `--quiet` | off | suppress progress on stderr |
+| `--threads N` | 8 | threads for the search kernel |
+| `--do_stdev` | off | also report the standard deviation of Jaccard across shared SCPs |
 
-**Preprocessing costs**
+`fastaai build INPUTS`:
 
-| stage | median s/genome | share |
+| flag | default | |
 |---|---|---|
-| predict (pyrodigal) | 1.79 | 64% |
-| hmmsearch (pyhmmer) | 1.03 | 36% |
+| `-d`, `--database` | `<dir>/database/` | a name adds levels beneath the root; an absolute path leaves it |
+| `--source LABEL` | none | provenance recorded in the database, e.g. `'GTDB R232 bac120'` |
+
+`fastaai query`:
+
+| flag | default | |
+|---|---|---|
+| `-q`, `--query` | *required* | a database, an archive, a crystal directory, or sequences |
+| `-t`, `--target` | the query itself | a self-search takes the symmetric upper-triangle path |
+| `-o`, `--output` | `<dir>/results/` | a directory of block files; `-` is stdout, for a single-block search |
+| `--output_style tsv\|matrix` | `tsv` | matrix holds AAI only |
+| `--emit both\|aai\|jaccard` | `both` | `aai` drops `avg_jacc_sim`, `jaccard` drops `AAI_estimate` |
+
+`fastaai crystallize SOURCE`, where *source* is a root holding `proteins/` and
+`hmm_hits/`:
+
+| flag | default | |
+|---|---|---|
+| `-o`, `--output` | `<source>/crystals/` | |
+| `--hmm FILE\|SET` | the bundled set | the models the archive was searched with |
+| `--filter v1\|v1_alt\|rbh` | `v1` | best-hit resolution baked into the crystals |
+| `--processes N` | 1 | scales 5-6x at 8 |
+| `--gzip`, `--quiet` | off | |
+
+`fastaai inspect DATABASE`:
+
+| flag | default | |
+|---|---|---|
+| `-o`, `--output` | `<database>/../inspect/` | |
+| `--by genome\|kmer\|both` | `both` | `genome`: what each genome contains, which lines up with its crystal. `kmer`: the index as stored |
+| `--full` | off | list every member rather than a count, reconstructing the index exactly. Large - tens of millions of rows at GTDB scale |
+| `--quiet` | off | |
+
+`fastaai reshape RESULTS`, which needs at least one of the two outputs:
+
+| flag | default | |
+|---|---|---|
+| `--per-genome DIR` | - | one TSV per query genome, that genome against everything |
+| `--matrix FILE` | - | the AAI-only matrix |
+| `--gzip`, `--quiet` | off | |
+
+## Usage: Python API
+
+```python
+import fastaai
+
+# Any rank of input to a database in one call. Ranks combine.
+db = fastaai.preprocess(genomes="/path/to/genomes")
+db = fastaai.preprocess(proteins=["a.faa", "b.faa"], crystals="other/crystals")
+
+res = fastaai.search(db, db, threads=8)
+```
+
+`preprocess` fills the same root the CLI does - `FastAAI/` unless `directory=`
+says otherwise - and writes the database to `FastAAI/database/`. `database=`
+names something beneath that root or gives an absolute path, and `save=False`
+builds without writing one. Its other arguments are `PH_tups=` for
+`(protein, hmm)` pairs, plus `models=`, `filter_mode=`, `processes=` and
+`compress=`, which mean what `--hmm`, `--filter`, `--processes` and `--gzip`
+mean on the command line.
+
+Reading the result. The matrices stay public, but the questions people actually
+ask have answers:
+
+```python
+res.queries, res.targets     # the genomes on each side, in row/column order
+res.shape                    # (n_queries, n_targets)
+res.scps("GCF_000007085.1")  # how many markers that genome carries
+
+res.best_hit("GCF_000007085.1")        # Match(query, target, aai, jaccard, shared, poss_shared)
+res.hits_for("GCF_000007085.1", k=5)   # its five nearest, best first
+res.top_hits(k=5)                      # that, for every query
+
+# Filtered iteration. Call it to filter, or iterate it for everything.
+for m in res(query="any", min_aai=60, min_shared_frac=0.5):
+    print(m.query, m.target, m.aai, m.shared_frac)
+
+res.jaccard   # (n, n) float64, NaN where no accession is shared
+res.shared    # (n, n) uint32, accessions carried by both genomes
+res.aai       # (n, n) float64, uncensored
+```
+
+`query=` and `target=` take `"any"` for all of them, one name, or a collection
+of names; the thresholds are inclusive. `min_shared_frac` is
+`shared / poss_shared` - of the markers the poorer genome carries, the fraction
+actually compared, which is what separates a genuinely distant pair from a pair
+where one genome is a bad assembly.
+
+A self-comparison's diagonal is a genome against itself, so it is **not** a
+neighbour: `hits_for` and `best_hit` skip it unless you pass
+`include_self=True`. Pairs sharing no marker are dropped rather than reported as
+zero - no shared marker is an absence of evidence, not evidence of distance.
+
+`res.to_tsv(path)` writes FastAAI 1's table - same columns, same names, same
+order. The band and the rounding are the engine's own, exposed rather than
+reimplemented, and the output is asserted byte-for-byte against
+`Database.write_block`; two writers for one format is how the two drift. A
+search too large to hold in memory writes its blocks straight from Rust
+instead.
+
+Or one step at a time. Each step comes in two forms - a **unit** that does one
+genome and returns a path, and a **driver** that runs it over many in parallel:
+
+```python
+prots = fastaai.genomes_to_proteins(genomes, "FastAAI/proteins", processes=8)
+hits  = fastaai.proteins_to_hmms(prots, "FastAAI/hmm_hits", processes=8)
+cry   = fastaai.prot_hmm_to_crystal(zip(prots, hits), "FastAAI/crystals", processes=8)
+
+db    = fastaai.build_database("FastAAI/crystals", save_to="FastAAI/database")
+res   = fastaai.search(db, db, threads=8)
+```
+
+`all_steps(genome, directory)` is the whole chain for one genome - predict,
+search, resolve, write - with nothing returned between stages, and `preprocess`
+is its driver. That is the shape the parallelism wants: one worker owns one
+genome from FASTA to crystal, so no intermediate crosses a process boundary and
+there is no collector to funnel through. Running the three steps as three
+parallel passes would be the same work with two extra synchronisation points
+and the intermediates read back off disk.
+
+The two reshaping helpers are the `fastaai reshape` verb, importable:
+
+```python
+fastaai.results_per_genome("FastAAI/results", "per_genome/")  # one TSV per query genome
+fastaai.results_to_matrix("FastAAI/results", "aai.matrix")    # the AAI-only matrix
+```
+
+Both stream, so peak memory is one row rather than one matrix.
+`fastaai.describe_database(db)` and `fastaai.dump_database(db, out)` are
+`inspect`, likewise.
+
+## Output format
+
+**The TSV is FastAAI 1's, unchanged** - same columns, same names, same order, so
+a parser written against v1 keeps working:
+
+```
+query  target  avg_jacc_sim  jacc_SD  num_shared_SCPs  poss_shared_SCPs  AAI_estimate
+```
+
+Numbers are rendered as `str(numpy.round(v, dp))`, matching v1 digit for digit:
+Jaccard and its standard deviation to 4 decimal places, AAI to 2.
+
+| | |
+|---|---|
+| `jacc_SD` | always present; reads `N/A` unless `--do_stdev` was given |
+| `poss_shared_SCPs` | `min(query SCPs, target SCPs)` - a pair cannot share more markers than the poorer genome carries |
+| `AAI_estimate` | `<30%` / `>90%` outside the regression's sensitivity band; `100.0` on the diagonal of a self-search |
+| a pair sharing no marker | `N/A` in every value column |
+
+**`--output_style matrix`** writes a Q×T grid of AAI - one row per query, one
+column per target, `query_genome` in the corner - with v1's `15.0` and `95.0`
+standing in for the two categorical labels, since a cell cannot hold a string.
+
+**The diagonal of a self-search reads `100`** - `100.0` in both the matrix and
+the TSV's `AAI_estimate`. Identity there is given by the comparison, not inferred
+from it; the regression is fitted and unbounded above, so consulting it returns a
+value past 100 that reports as the `>90%` sentinel, which is uncertainty about
+something that is not uncertain.
+
+Nothing else is exempt, and the exemption is a property of the *comparison*, not
+of the genome. Two distinct genomes that happen to be identical are a
+measurement that came out at the ceiling - equality of content is not identity.
+So is the same genome held in two different databases and compared across them:
+the engine is not told they are one genome, so that pair reads `95.0` in the
+matrix and `>90%` in the TSV like any other ceiling measurement.
+
+Two deliberate departures from v1: (1) a pair sharing no marker is `N/A` in the
+matrix where v1 writes `0`, which cannot be differentiated from a real
+measurement of zero, and (2) the diagonal of a self-search reports `100`
+where v1 reports `>90%`, to indicate genuine identity.
+
+### Blocks
+
+v1 output TSV files either as a monolith (all queries vs. all targets) or as individual, per-query-genome
+TSVs that were each one-to-all. It also supported a monolithic matrix output of just AAI values.
+
+v1.5 writes one file per (query partition × target partition) block:
+
+```text
+                     target partitions
+                 t00000     t00001     t00002
+               ┌──────────┬──────────┬──────────┐
+        q00000 │   file   │   file   │   file   │
+               ├──────────┼──────────┼──────────┤
+        q00001 │   file   │   file   │   file   │   ← query partitions
+               ├──────────┼──────────┼──────────┤
+        q00002 │   file   │   file   │   file   │
+               └──────────┴──────────┴──────────┘
+
+  FastAAI/results/
+  ├─ block_q00000_t00000.tsv
+  ├─ block_q00000_t00001.tsv
+  ├─ …
+  └─ block_q00002_t00002.tsv
+```
+
+This is true for both output formats; `--output_style matrix` writes the same
+grid of files with a `.matrix` extension. Every TSV block carries the header, so
+blocks concatenate into one valid v1 table. The
+Python API includes search functions to extract single genome information, and
+there are helper functions to produce the same per-genome one-vs-all TSVs as
+before, as well as converting TSVs to a matrix (the reverse direction is not
+possible because the matrices hold only a subset of information.)
 
 ## Preprocessing outputs
 
-Everything a run produces lands under one root - `FastAAI/` in the working
-directory, or wherever `--dir` says. Nothing is discarded and nothing is written
-outside it.
+The same tree as above, with what each rank costs and where it comes from:
 
 ```text
   genome.fna.gz  (yours, named however you like)
@@ -64,7 +340,7 @@ outside it.
        │
        │  then Rust, once, over the whole crystal set
        ▼
-   k-merise, invert, partition ───►  <root>/database/<name>/
+   k-merise, invert, partition ───►  <root>/database/
                                      5 s for 2,943 genomes
 
    a search adds ─────────────────►  <root>/results/block_qNNNNN_tNNNNN.tsv
@@ -106,9 +382,9 @@ the size of the collection as a result: a worker drops a genome's sequences once
 its crystal is written, and the build streams them one file at a time.
 
 ```sh
-fastaai build genomes/ -d firm            # crystals written to FastAAI/crystals/
+fastaai build genomes/                    # crystals written to FastAAI/crystals/
 fastaai crystallize old_run/              # or from proteins and hits you already have
-fastaai build FastAAI/crystals -d firm    # rebuild, no prediction or search
+fastaai build FastAAI/crystals            # rebuild, no prediction or search
 ```
 
 When crystalized, the 2,943 Firmicutes genomes are ~88MB unzipped and ~26MB zipped.
@@ -121,26 +397,32 @@ to share the crystals in a tarball instead of directly shipping the database. Th
 compact, they're more transparent, and you can add more genomes to a collection. You can't do 
 that with a database in v1.5
 
-## Agreement with FastAAI 1
+## Marker sets
 
-FastAAI v1.5 has a small bugfix to the calculation of Jaccard similarity between genomes. v1 
-admits the stop symbol `*` and ambiguous residues `X`, as parts of valid kmers for comparison, 
-while v1.5 does not. The bug produced tiny errors that wouldn't affect the material 
-interpretation of any results, but it's fixed nonetheless.
+**The 122 SCPs FastAAI 1 shipped are bundled and used by default**, so an install
+works without hunting for models. They are a default, not a fixture: `--hmm` takes
+any HMM file, plain or gzipped, and the accession list, index and output all
+follow from it. Every database records which model set built it, so defaults and
+overrides cannot be mixed by accident.
 
-120 Firmicutes genomes, all-vs-all, against FastAAI 1 driven through its own
-`aai_index` module.
+GTDB's marker sets are packaged too, reachable by name because a file inside
+site-packages is not a path anyone wants to type:
 
-![v1 vs v1.5 concordance](fastaai2/methods/concordance_v1_v15.png)
+| `--hmm` | models | |
+|---|---|---|
+| *(omitted)* | 122 | FastAAI 1's SCPs - the default |
+| `gtdb-bact` | 120 | GTDB bac120, bacteria |
+| `gtdb-arch` | 53 | GTDB ar53, archaea |
+| `gtdb-all` | 168 | the union of both - they share 5 markers, so this is not 173 |
 
-| | |
-|---|---|
-| pairs compared (off-diagonal) | 14,280 |
-| shared-SCP differences | 0 |
-| median \|Δ AAI\| | 0.0115 percentage points |
-| max \|Δ AAI\| | 0.0627 percentage points |
+Case and underscores are interchangeable (`GTDB_BACT` works). These are
+assembled from Pfam and TIGRFAM rather than copied from GTDB-Tk, and the pinned
+Pfam versions have since moved on, so they benchmark the engine but **do not
+reproduce GTDB's trees** - see `python/fastaai/data/README.md`.
 
-See **[`fastaai2/methods/`](fastaai2/methods/)** for the data and the harness for this comparison.
+The three sets agree closely enough that there is no accuracy reason to prefer
+one over another; choose on which markers your other tooling already produces.
+See `fastaai2/methods/marker_sets.md` for the comparison.
 
 ## Database representation
 
@@ -181,7 +463,7 @@ partitions that are independent of one another:
 
 ```text
 FastAAI 1.5                                 a directory
-db/
+FastAAI/database/
 ├─ schema                                   k, alphabet, ordered accessions,
 │                                           filter mode, model fingerprint
 ├─ manifest                                 genome → ordinal, partition,
@@ -201,208 +483,57 @@ representations while still using reasonable RAM allocations (a max-sized partit
 deviation calculation on takes ~1GB RAM). This eliminates all redundant lookups of kmer information
 and enables the quicker tabulation of results that accelerates v1.5 relative to v1.
 
-## Output formatting changes:
+## Performance
 
-v1 output TSV files either as a monolith (all queries vs. all targets) or as individual, per-query-genome
-TSVs that were each one-to-all. It also supported a monolithic matrix output of just AAI values.
+**Search**, 8 threads. v1 was run through `db_query --in_memory --store_results`, its
+fastest path:
 
-v1.5 writes one file per (query partition × target partition) block:
+This was done on my laptop, so don't use the numbers as a final estimate of performance. The point is that it's quite a bit faster than v1. Throughput is pairwise genome comparisons per second per thread.
 
-```text
-                     target partitions
-                 t00000     t00001     t00002
-               ┌──────────┬──────────┬──────────┐
-        q00000 │   file   │   file   │   file   │
-               ├──────────┼──────────┼──────────┤
-        q00001 │   file   │   file   │   file   │   ← query partitions
-               ├──────────┼──────────┼──────────┤
-        q00002 │   file   │   file   │   file   │
-               └──────────┴──────────┴──────────┘
+| scale | pairs | v1 | v1.5 | v1 /s/thread | v1.5 /s/thread |
+|---|---|---|---|---|---|
+| **2,943 genomes** | **8,661,249** | **21.84 s** | **1.587 s** | **49,572** | **682,203** |
 
-  out/
-  ├─ block_q00000_t00000.tsv
-  ├─ block_q00000_t00001.tsv
-  ├─ …
-  └─ block_q00002_t00002.tsv
-```
+Memory and disk at 2,943 genomes:
 
-This is true for both the TSV and matrix output formats. The Python API includes search 
-functions to extract single genome information, and there are helper functions to produce 
-the same per-genome one-vs-all TSVs as before, as well as converting TSVs to a matrix (the
-reverse direction is not possible because the matrices hold only a subset of information.)
-
-## Install
-
-```sh
-cd fastaai2
-maturin develop --release      # or: pip install .
-```
-
-## Use
-
-```sh
-# build a database - bundled 122-SCP set, everything kept under FastAAI/
-fastaai build /path/to/genomes -d firm
-
-# put the run somewhere else, and gzip every file it writes
-fastaai build /path/to/genomes -d firm --dir /scratch/run17 --gzip
-
-# query it - against itself, or against another database
-fastaai query -q FastAAI/database/firm                 # -> FastAAI/results/
-fastaai query -q queries/ -t FastAAI/database/firm -o aai.tsv
-fastaai query -q FastAAI/database/firm -o -            # -> stdout
-
-# any other SCP set works; --hmm takes a file
-fastaai build /path/to/genomes --hmm my_markers.hmm -d custom
-
-# or one of the packaged sets, by name
-fastaai build /path/to/genomes --hmm gtdb-bact -d gtdb
-```
-
-**The 122 SCPs FastAAI 1 shipped are bundled and used by default**, so an install
-works without hunting for models. They are a default, not a fixture: `--hmm` takes
-any HMM file, plain or gzipped, and the accession list, index and output all
-follow from it. Every database records which model set built it, so defaults and
-overrides cannot be mixed by accident.
-
-GTDB's marker sets are packaged too, reachable by name because a file inside
-site-packages is not a path anyone wants to type:
-
-| `--hmm` | models | |
+| | v1 | v1.5 |
 |---|---|---|
-| *(omitted)* | 122 | FastAAI 1's SCPs - the default |
-| `gtdb-bact` | 120 | GTDB bac120, bacteria |
-| `gtdb-arch` | 53 | GTDB ar53, archaea |
-| `gtdb-all` | 168 | the union of both - they share 5 markers, so this is not 173 |
+| peak RSS | 1.01 GB | 116 MB index |
+| database on disk | 508 MB | 116 MB |
 
-Case and underscores are interchangeable (`GTDB_BACT` works). These are
-assembled from Pfam and TIGRFAM rather than copied from GTDB-Tk, and the pinned
-Pfam versions have since moved on, so they benchmark the engine but **do not
-reproduce GTDB's trees** - see `python/fastaai/data/README.md`.
+**Preprocessing costs**
 
-The three sets agree closely enough that there is no accuracy reason to prefer
-one over another; choose on which markers your other tooling already produces.
-See `fastaai2/methods/marker_sets.md` for the comparison.
+| stage | median s/genome | share |
+|---|---|---|
+| predict (pyrodigal) | 1.79 | 64% |
+| hmmsearch (pyhmmer) | 1.03 | 36% |
 
-## TSV format
+## Agreement with FastAAI 1
 
-**The TSV is FastAAI 1's, unchanged** - same columns, same names, same order, so
-a parser written against v1 keeps working:
+FastAAI v1.5 has a small bugfix to the calculation of Jaccard similarity between genomes. v1 
+admits the stop symbol `*` and ambiguous residues `X`, as parts of valid kmers for comparison, 
+while v1.5 does not. The bug produced tiny errors that wouldn't affect the material 
+interpretation of any results, but it's fixed nonetheless.
 
-```
-query  target  avg_jacc_sim  jacc_SD  num_shared_SCPs  poss_shared_SCPs  AAI_estimate
-```
+120 Firmicutes genomes, all-vs-all, against FastAAI 1 driven through its own
+`aai_index` module.
 
-Every block file carries this header, so blocks concatenate into one valid v1
-table. Numbers are rendered as `str(numpy.round(v, dp))`, matching v1 digit for
-digit: Jaccard and its standard deviation to 4 decimal places, AAI to 2.
+![v1 vs v1.5 concordance](fastaai2/methods/concordance_v1_v15.png)
 
 | | |
 |---|---|
-| `jacc_SD` | always present; reads `N/A` unless `--do_stdev` was given |
-| `poss_shared_SCPs` | `min(query SCPs, target SCPs)` - a pair cannot share more markers than the poorer genome carries |
-| `AAI_estimate` | `<30%` / `>90%` outside the regression's sensitivity band; `100.0` for a genome against itself |
-| a pair sharing no marker | `N/A` in every value column |
+| pairs compared (off-diagonal) | 14,280 |
+| shared-SCP differences | 0 |
+| median \|Δ AAI\| | 0.0115 percentage points |
+| max \|Δ AAI\| | 0.0627 percentage points |
 
-`--emit` narrows the columns (`jaccard` drops `AAI_estimate`, `aai` drops
-`avg_jacc_sim`); the default emits the full v1 schema.
-
-**`--output_style matrix`** writes a Q×T grid of AAI - one row per query, one
-column per target, `query_genome` in the corner - with v1's `15.0` and `95.0`
-standing in for the two categorical labels, since a cell cannot hold a string.
-
-It is written per block exactly as the TSV is: each file is the Q×T grid for one
-partition pair, not for the whole search, so it carries no size restriction.
-
-**A genome against itself reads `100`** - `100.0` in both the matrix diagonal and
-the TSV's `AAI_estimate`. Identity there is given by the comparison, not inferred
-from it; the regression is fitted and unbounded above, so consulting it returns a
-value past 100 that reports as the `>90%` sentinel, which is uncertainty about
-something that is not uncertain.
-
-Only a genome against *itself* is exempt. Two distinct genomes that happen to be
-identical are a measurement that came out at the ceiling, and still read `95.0`
-in the matrix and `>90%` in the TSV - equality of content is not identity.
-
-Two deliberate departures from v1: (1) a pair sharing no marker is `N/A` in the
-matrix where v1 writes `0`, which cannot be differentiated from a real 
-measurement of zero, and (2) a genome against itself reports `100`
-where v1 reports `>90%` to indicate genuine identity.
+See **[`fastaai2/methods/`](fastaai2/methods/)** for the data and the harness for this comparison.
 
 **FastAAI 1 command lines still work.** `build_db`, `db_query`, `aai_index`,
 `single_query`, `multi_query` and `simple_query` are rerouted to the new verbs,
 with arguments preserved where they still mean something and a diagnostic where
 they do not. `merge_db` is the one that no longer has a target: it exits saying
 so and gives the crystal-and-rebuild replacement.
-
-```python
-import fastaai
-
-# The whole thing, from whichever rank you have. Ranks combine.
-db = fastaai.preprocess(genomes="/path/to/genomes", database="firm")
-db = fastaai.preprocess(proteins=["a.faa", "b.faa"], crystals="other/crystals")
-
-res = fastaai.search(db, db, threads=8)
-```
-
-Reading the result. The matrices stay public, but the questions people actually
-ask have answers:
-
-```python
-res.queries, res.targets     # the genomes on each side, in row/column order
-res.shape                    # (n_queries, n_targets)
-res.scps("GCF_000007085.1")  # markers that genome carries
-
-res.best_hit("GCF_000007085.1")        # Match(query, target, aai, jaccard, shared, poss_shared)
-res.hits_for("GCF_000007085.1", k=5)   # its five nearest, best first
-res.top_hits(k=5)                      # that, for every query
-
-# Filtered iteration. Call it to filter, or iterate it for everything.
-for m in res(query="any", min_aai=60, min_shared_frac=0.5):
-    print(m.query, m.target, m.aai, m.shared_frac)
-
-res.jaccard   # (n, n) float64, NaN where no accession is shared
-res.shared    # (n, n) uint32, accessions carried by both genomes
-res.aai       # (n, n) float64, uncensored
-```
-
-`query=` and `target=` take `"any"` for all of them, one name, or a collection
-of names; the thresholds are inclusive. `min_shared_frac` is
-`shared / poss_shared` - of the markers the poorer genome carries, the fraction
-actually compared, which is what separates a genuinely distant pair from a pair
-where one genome is a bad assembly.
-
-A self-comparison's diagonal is a genome against itself, so it is **not** a
-neighbour: `hits_for` and `best_hit` skip it unless you pass
-`include_self=True`. Pairs sharing no marker are dropped rather than reported as
-zero - no shared marker is an absence of evidence, not evidence of distance.
-
-`res.to_tsv(path)` writes FastAAI 1's table - same columns, same names, same
-order. The band and the rounding are the engine's own, exposed rather than
-reimplemented, and the output is asserted byte-for-byte against
-`Database.write_block`; two writers for one format is how the two drift. A
-search too large to hold in memory writes its blocks straight from Rust
-instead.
-
-Or one step at a time. Each step comes in two forms - a **unit** that does one
-genome and returns a path, and a **driver** that runs it over many in parallel:
-
-```python
-prots = fastaai.genomes_to_proteins(genomes, "FastAAI/proteins", processes=8)
-hits  = fastaai.proteins_to_hmms(prots, "FastAAI/hmm_hits", processes=8)
-cry   = fastaai.prot_hmm_to_crystal(zip(prots, hits), "FastAAI/crystals", processes=8)
-
-db    = fastaai.build_database("FastAAI/crystals", save_to="FastAAI/database/firm")
-res   = fastaai.search(db, db, threads=8)
-```
-
-`all_steps(genome, directory)` is the whole chain for one genome - predict,
-search, resolve, write - with nothing returned between stages, and `preprocess`
-is its driver. That is the shape the parallelism wants: one worker owns one
-genome from FASTA to crystal, so no intermediate crosses a process boundary and
-there is no collector to funnel through. Running the three steps as three
-parallel passes would be the same work with two extra synchronisation points
-and the intermediates read back off disk.
 
 ## Status
 

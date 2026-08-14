@@ -5,7 +5,7 @@ Two verbs replace FastAAI 1's seven modules:
     fastaai build   inputs -> a database
     fastaai query   database x database -> AAI
 
-plus two that compute nothing:
+plus three that operate on what those left behind:
 
     fastaai crystallize   proteins + hits -> crystals
     fastaai inspect       a database -> readable text
