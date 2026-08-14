@@ -5,6 +5,8 @@ reported rather than silently dropped — quietly ignoring `--do_stdev` would
 remove an output column the caller explicitly asked for.
 """
 
+import itertools
+
 import numpy as np
 import pytest
 
@@ -216,21 +218,89 @@ def test_absent_optional_v1_flags_do_not_reach_argv():
         assert None not in _reroute(argv), argv
 
 
-def test_v1_archive_becomes_dir():
+def test_archive_becomes_dir():
     """`--archive` was carried through to a parser that never defined it.
 
-    The reroute built the new command line from scratch, so an undefined flag
-    landing in argv made argparse reject the whole thing — the one outcome
-    rerouting exists to prevent. v1.5 always writes the store, and `--dir`
-    names the root holding it, so the flag translates.
+    Not a v1 flag: it was this project's own, replaced by `--dir`, and its
+    entry in the carried list outlived the flag itself. It translates rather
+    than being dropped, because a flag naming an output location must not be
+    silently ignored.
     """
     got = _reroute(["build_db", "-g", "/in", "--archive", "/arch"])
     assert "--archive" not in got, "a flag the new parser does not define"
     assert got[got.index("--dir") + 1] == "/arch"
 
-    # Every accepted v1 command line must parse. Nothing may reach argparse
-    # that argparse does not know.
-    build_parser().parse_args(got)
+
+def test_output_style_is_not_carried_to_a_build():
+    """A build produces no results, so `build` does not define the flag.
+
+    Carrying it there rejected the whole command line. It is reported instead,
+    because a flag that changes the output must not vanish silently.
+    """
+    got = _reroute(["build_db", "-g", "/in", "--output_style", "matrix"])
+    assert "--output_style" not in got
+    assert "--output_style" in _reroute(["db_query", "-q", "/a",
+                                         "--output_style", "matrix"])
+
+
+#: Every v1 flag `_reroute` may carry, with a plausible value.
+V1_CARRIED = {
+    "--threads": "8", "--filter": "rbh", "--output_style": "matrix",
+    "--limit": "5", "--hmm": "m.hmm", "--archive": "arch/",
+    "--verbose": None, "--quiet": None, "--do_stdev": None,
+    "--in_memory": None, "--store_results": None, "--compress": None,
+}
+
+#: A minimal valid v1 invocation per module, both input spellings where they
+#: differ, since the genome and protein paths translate differently.
+V1_INVOCATIONS = (
+    ("build_db", ["-g", "/in", "-d", "/out"]),
+    ("build_db", ["-p", "/in", "-d", "/out"]),
+    ("aai_index", ["-g", "/in", "-o", "/out.tsv"]),
+    ("db_query", ["-q", "/a", "-t", "/b", "-o", "/o"]),
+    ("db_query", ["-q", "/a"]),
+    ("simple_query", ["-g", "/in", "--target", "/b", "-o", "/o"]),
+    ("multi_query", ["--query_genomes", "/a", "--target_genomes", "/b"]),
+    ("multi_query", ["--query_proteins", "/a", "--target_proteins", "/b"]),
+    ("single_query", ["-qg", "/a.fna", "-tg", "/b.fna"]),
+    ("single_query", ["-qp", "/a.faa", "-tp", "/b.faa"]),
+)
+
+
+@pytest.mark.parametrize("module,base", V1_INVOCATIONS)
+def test_every_rerouted_v1_command_line_parses(module, base, capsys):
+    """The general form of the `--archive` bug.
+
+    `_reroute` builds the new command line from scratch rather than editing the
+    old one, so any flag it emits that the target subparser does not define
+    rejects the entire invocation — which is the one outcome rerouting exists
+    to prevent. A flag being wrong for the target verb is not a parse error to
+    surface at the user; it is ours to translate or report.
+
+    Combinations, not one flag at a time: `--archive` and `--output_style` were
+    each carried by the same shared helper, so a per-flag check can pass while
+    the helper is still wrong for a given verb.
+    """
+    for r in range(3):
+        for combo in itertools.combinations(V1_CARRIED, r + 1):
+            argv = [module] + list(base)
+            for flag in combo:
+                argv.append(flag)
+                if V1_CARRIED[flag] is not None:
+                    argv.append(V1_CARRIED[flag])
+            try:
+                new = _reroute(argv)
+            except SystemExit:
+                continue          # an intentional refusal, not a parse failure
+            try:
+                build_parser().parse_args(new)
+            except SystemExit:  # pragma: no cover - the failure being guarded
+                capsys.readouterr()
+                raise AssertionError(
+                    f"{' '.join(argv)}\n  rerouted to: fastaai {' '.join(new)}\n"
+                    f"  which the parser rejects"
+                )
+    capsys.readouterr()
 
 
 def test_a_v1_self_query_without_target_still_runs(tmp_path):

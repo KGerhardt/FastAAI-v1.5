@@ -17,7 +17,7 @@ the counting kernel and the AAI transform.
 
 ```sh
 maturin develop --release      # or: pip install .
-python -m pytest tests -q      # 279 Python tests
+python -m pytest tests -q      # 291 Python tests
 cargo test                     # 53 Rust tests
 ```
 

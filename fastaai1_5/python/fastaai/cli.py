@@ -509,17 +509,34 @@ def _reroute(argv: list[str]) -> list[str]:
         """
         return [flag, value] if value is not None else []
 
-    def carried():
+    def carried(verb: str = "query"):
+        """v1 arguments that still mean something, translated for *verb*.
+
+        Only flags the target subparser actually defines may be emitted. The
+        new command line is built from scratch rather than edited, so anything
+        put here that argparse does not know rejects the whole invocation —
+        which is the one thing rerouting exists to prevent.
+        """
         out = []
-        for n in ("--threads", "--filter", "--output_style", "--limit", "--hmm"):
+        names = ["--threads", "--filter", "--limit", "--hmm"]
+        if verb == "query":
+            # A build produces no results, so it has no output to style and
+            # the subparser does not define the flag.
+            names.append("--output_style")
+        elif opt("--output_style") is not None:
+            print("note: --output_style applies to a query, not a build; "
+                  "pass it to `fastaai query`", file=sys.stderr)
+        for n in names:
             v = opt(n)
             if v is not None:
                 out += [n, v]
-        # v1's --archive named where to keep the preprocessing store. v1.5 always
-        # writes one, and `--dir` names the root that holds it, so the flag
-        # translates. Carrying it through unchanged put a flag the new parser
-        # never defines into argv, and argparse rejected the whole command line
-        # — the one outcome the reroute exists to prevent.
+        # `--archive` is not a v1 flag — v1 never had one. It was *this*
+        # project's, naming where to keep the preprocessing store, and it was
+        # replaced by `--dir` when a run got one durable root. Its entry here
+        # outlived it: the flag was deleted from the parser and left in this
+        # list, so it was carried into argv that argparse then rejected whole —
+        # the one outcome rerouting exists to prevent. Translated rather than
+        # dropped, because a flag naming an output location must not be ignored.
         archive = opt("--archive")
         if archive is not None and opt("--dir") is None:
             print(f"note: --archive is now --dir, the root holding proteins/, "
@@ -561,7 +578,7 @@ def _reroute(argv: list[str]) -> list[str]:
     out = opt("-o", "--output")
     if module == "build_db":
         return ["build", inp] + pair("-d", opt("-d", "--database") or out) \
-            + kind + carried()
+            + kind + carried("build")
     if module == "aai_index":
         return ["query"] + pair("-q", inp) + pair("-o", out) + kind + carried()
     if module == "db_query":

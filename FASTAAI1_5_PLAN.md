@@ -49,9 +49,8 @@ genome count:
 > is dead code whose index is never built. Measured cost of the correction:
 > **mean 1.58×10⁻⁴, max 1.17×10⁻³ Jaccard**, SCP sets unchanged (§6.1).
 
-**Real data is now available** at
-`C:\Users\kenji\Desktop\fastaai2\ncbi_bacilliati\genome_collections` — five
-collections spanning multiple phyla. Note `bacciliati_labeled_genomes` (6,622) is
+**Real data is now available**: five NCBI collections spanning multiple phyla,
+held outside the repository. Note `bacciliati_labeled_genomes` (6,622) is
 the *union* of the other four renamed by `genome_mover.py`
 (3,434 + 83 + 2,943 + 162 = 6,622), so ingesting both directories double-counts
 every genome. **6,622 unique genomes, not 13,244.**

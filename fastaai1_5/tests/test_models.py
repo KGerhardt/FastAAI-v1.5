@@ -6,29 +6,36 @@ These tests guard the two things that would make that optimisation wrong: models
 must come out identical, and the accession list must stay positional.
 """
 
+import gzip
 import io
 import os
+import shutil
 from pathlib import Path
 
 import pytest
 
 pyhmmer = pytest.importorskip("pyhmmer")
 
-from fastaai.search import ModelSet, _load_hmms
+from fastaai.search import ModelSet, _load_hmms, bundled_hmm_path
 
-BUNDLED = Path(
-    "/mnt/c/Users/kenji/Desktop/kenji_side_hustles/fastaai2/FastAAI/fastaai/"
-    "00.Libraries/01.SCG_HMMs/Complete_SCG_DB.hmm"
-)
-
-needs_hmm = pytest.mark.skipif(not BUNDLED.exists(), reason="bundled HMM set not present")
+# The packaged set, not a checkout of FastAAI 1. These used to point at an
+# absolute path into a local clone and skip when it was absent, so they ran on
+# one machine and silently passed everywhere else.
+BUNDLED = Path(bundled_hmm_path())
 
 
-@needs_hmm
-def test_in_memory_load_matches_path_load():
-    """The fast route must be a pure optimisation, not a different parse."""
+def test_in_memory_load_matches_path_load(tmp_path):
+    """The fast route must be a pure optimisation, not a different parse.
+
+    `HMMFile` needs a real uncompressed path to take its slow route, which is
+    the thing being compared against, so the packaged set is expanded here.
+    """
+    plain = tmp_path / "models.hmm"
+    with gzip.open(BUNDLED, "rb") as src, open(plain, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+
     fast = _load_hmms(str(BUNDLED))
-    with pyhmmer.plan7.HMMFile(str(BUNDLED)) as fh:
+    with pyhmmer.plan7.HMMFile(str(plain)) as fh:
         slow = list(fh)
 
     assert len(fast) == len(slow)
@@ -37,7 +44,6 @@ def test_in_memory_load_matches_path_load():
     assert [h.M for h in fast] == [h.M for h in slow]
 
 
-@needs_hmm
 def test_accession_index_is_positional():
     """Accession IDs are positions in the model file's order — there is no
     compiled-in Pfam list, so this mapping is the whole schema."""
@@ -47,7 +53,6 @@ def test_accession_index_is_positional():
     assert len(set(m.accessions)) == len(m.accessions), "accessions must be unique"
 
 
-@needs_hmm
 def test_trusted_cutoffs_are_detected_not_assumed():
     """`bit_cutoffs='trusted'` raises on models lacking TC lines. The bundled set
     has them; the point is that the code checks rather than assuming."""
