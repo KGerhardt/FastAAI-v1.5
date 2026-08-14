@@ -4,9 +4,9 @@
 built, imported or tested by the package, and none of it is maintained.
 
 It is kept because it is the only runnable record of the alternatives that were
-measured and rejected. Every performance claim in the READMEs and in
-`../FASTAAI1_5_PLAN.md` was produced here, and deleting it would turn those numbers
-into assertions nobody can check.
+measured and rejected. The kernel numbers in `../fastaai1_5/README.md`, and the
+variant costs cited in `../fastaai1_5/src/kernel.rs` and `src/index.rs`, were
+produced here; deleting it would turn those into assertions nobody can check.
 
 ## What it measured
 
