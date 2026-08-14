@@ -271,6 +271,104 @@ def prot_hmm_to_crystal(pairs: Iterable[tuple], out_dir, models=None, *,
     return [Path(p) for p in out if p is not None]
 
 
+def describe_database(db) -> dict:
+    """A database's metadata, as plain values."""
+    from . import _core
+
+    if not hasattr(db, "genome_names"):
+        db = _core.open_database(os.fspath(db))
+    return {
+        "genomes": db.n_genomes,
+        "partitions": db.n_partitions,
+        "partition_size": db.partition_size,
+        "partition_genomes": list(db.partition_genomes),
+        "accessions": len(db.accession_names),
+        "k": db.k,
+        "alphabet": db.alphabet,
+        "filter_mode": db.filter_mode,
+        "models": db.models,
+        "source": db.source,
+        "schema_key": db.schema_key(),
+        "index_bytes": db.index_bytes(),
+        "occupancy": db.occupancy(),
+    }
+
+
+def dump_database(db, out_dir, *, orientation: str = "genome",
+                  full: bool = False) -> dict:
+    """Write a database out as text. Returns the paths written.
+
+    The stored form is packed binary because that is what makes it fast and
+    small; this is the readable view of the same thing:
+
+        schema.txt        k, alphabet, filter, fingerprint, sizes
+        accessions.tsv    accession id -> name, id being its position
+        genomes.tsv       genome, partition, local id, markers carried
+        by_genome.tsv     one row per (genome, accession)
+        by_kmer.json      accession -> k-mer -> genomes, nested
+
+    *orientation* picks which index file to write — `"genome"`, `"kmer"`, or
+    `"both"`. They answer different questions: by-genome is what a genome
+    contains and lines up with its crystal, by-kmer is the CSR as stored and
+    shows which genomes share a k-mer. By-kmer needs no transpose and is the
+    cheaper of the two.
+
+    By-kmer is JSON rather than a table because a table repeats the partition
+    and accession on every row, and at index scale that repetition is most of
+    the file. Nested, each appears once and a k-mer's genomes are ordinals into
+    the `genomes` list at the top. Partition stays an outer level because a
+    posting list is partition-local — the same k-mer id in two partitions is two
+    independent lists — and keeping it lets the file stream out one partition at
+    a time instead of accumulating.
+
+    *full* adds the member column — every k-mer id, or every genome name — which
+    reconstructs the index exactly and is correspondingly large. Left off, each
+    row carries a count, which is what "what is in here" needs.
+    """
+    from . import _core
+
+    if not hasattr(db, "genome_names"):
+        db = _core.open_database(os.fspath(db))
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    info = describe_database(db)
+
+    (out / "schema.txt").write_text(
+        "\n".join(f"{k}\t{v}" for k, v in info.items() if k != "partition_genomes")
+        + f"\npartition_genomes\t{','.join(map(str, info['partition_genomes']))}\n")
+
+    (out / "accessions.tsv").write_text(
+        "id\taccession\n"
+        + "".join(f"{i}\t{a}\n" for i, a in enumerate(db.accession_names)))
+
+    # Which partition a genome sits in, and its local id, are derivable from the
+    # partition sizes — they are how a posting list is addressed.
+    counts = db.scp_counts()
+    rows, g = [], 0
+    for pi, n in enumerate(db.partition_genomes):
+        for local in range(n):
+            rows.append(f"{db.genome_names[g]}\t{pi}\t{local}\t{counts[g]}\n")
+            g += 1
+    (out / "genomes.tsv").write_text("genome\tpartition\tlocal_id\tn_markers\n"
+                                     + "".join(rows))
+
+    if orientation not in ("genome", "kmer", "both"):
+        raise ValueError("orientation must be 'genome', 'kmer' or 'both', "
+                         f"not {orientation!r}")
+
+    written = {"schema": out / "schema.txt",
+               "accessions": out / "accessions.tsv",
+               "genomes": out / "genomes.tsv"}
+    rows = {}
+    for which in (("genome", "kmer") if orientation == "both" else (orientation,)):
+        dest = out / (f"by_{which}.json" if which == "kmer"
+                      else f"by_{which}.tsv")
+        rows[which] = db.write_dump(str(dest), which, full)
+        written[f"by_{which}"] = dest
+    written["rows"] = rows
+    return written
+
+
 def all_steps(genome, directory=layout.DEFAULT_ROOT, models=None, *,
               filter_mode: FilterMode = DEFAULT_FILTER, compress: bool = False,
               input_kind: str = "auto"):
@@ -317,7 +415,7 @@ def build_database(crystals, models=None, *, k: int | None = None,
 
 
 def preprocess(genomes=None, proteins=None, PH_tups=None, crystals=None,
-               directory=layout.DEFAULT_ROOT, database="database", *,
+               directory=layout.DEFAULT_ROOT, database=None, *,
                models=None, filter_mode: FilterMode = DEFAULT_FILTER,
                processes: int = 4, compress: bool = False, save: bool = True,
                progress=None):
@@ -334,8 +432,9 @@ def preprocess(genomes=None, proteins=None, PH_tups=None, crystals=None,
     exactly as the CLI fills it: `proteins/`, `hmm_hits/`, `crystals/` and
     `database/`. Nothing is written outside it and nothing is discarded.
 
-    *database* is a name placed in `<directory>/database/`; a path with a
-    separator is taken literally. Pass `save=False` to build without writing it.
+    The database is written to `<directory>/database/` unless *database* names
+    something beneath it, or gives an absolute path. Pass `save=False` to build
+    without writing it at all.
     """
     from .pipeline import preprocess_paths
 

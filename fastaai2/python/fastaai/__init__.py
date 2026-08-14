@@ -9,6 +9,8 @@ from .ingest import find_genomes, genome_name, read_fasta
 from .api import (
     all_steps,
     build_database,
+    describe_database,
+    dump_database,
     genome_to_protein,
     genomes_to_proteins,
     preprocess,
@@ -65,6 +67,8 @@ __all__ = [
     "predict_proteins",
     "all_steps",
     "build_database",
+    "describe_database",
+    "dump_database",
     "build_from_crystals",
     "crystallize_archive",
     "genome_to_protein",

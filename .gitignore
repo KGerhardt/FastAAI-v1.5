@@ -27,3 +27,6 @@ _core.abi3.so
 *.tsv.gz
 /firmicutes_*/
 *_results.tsv
+
+# Scratch example run for manual inspection, not part of the release.
+/fastaai_example_run/

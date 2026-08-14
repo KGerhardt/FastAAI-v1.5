@@ -421,3 +421,124 @@ def test_parallel_preprocessing_requires_an_output_directory(tmp_path):
     # Serial is fine: nothing crosses a boundary, so the data is free to keep.
     recs = preprocess_paths(prots, ModelSet(), processes=1, input_kind="protein")
     assert recs[0].proteins is not None
+
+
+# --- inspecting a database ----------------------------------------------------
+
+def test_dump_orientations_describe_the_same_index(tmp_path):
+    """by_genome transposes the CSR, by_kmer emits it as stored. They are two
+    views of one thing, so their posting-entry totals must agree."""
+    prots = [_protein_file(tmp_path, f"d{i}") for i in range(3)]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "dd"),
+                            save=False, processes=2)
+
+    out = tmp_path / "inspect"
+    written = fastaai.dump_database(db, out, orientation="both", full=True)
+
+    import json
+
+    by_genome = sum(int(r.split("\t")[2])
+                    for r in written["by_genome"].read_text().splitlines()[1:])
+    doc = json.loads(written["by_kmer"].read_text())
+    by_kmer = sum(len(v) for part in doc["partitions"]
+                  for acc in part["accessions"].values() for v in acc.values())
+    assert by_genome == by_kmer
+
+
+def test_dump_writes_the_metadata_files(tmp_path):
+    prots = [_protein_file(tmp_path, f"e{i}") for i in range(2)]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "ee"),
+                            save=False, processes=1)
+    written = fastaai.dump_database(db, tmp_path / "insp", orientation="genome")
+
+    for key in ("schema", "accessions", "genomes", "by_genome"):
+        assert written[key].exists(), key
+    assert "by_kmer" not in written, "only the requested orientation is written"
+
+
+def test_by_kmer_is_valid_json_and_nests_away_the_repetition(tmp_path):
+    """A flat table repeats partition and accession on every row; at index scale
+    that repetition is most of the file."""
+    import json
+
+    prots = [_protein_file(tmp_path, f"j{i}") for i in range(3)]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "jj"),
+                            save=False, processes=1)
+    written = fastaai.dump_database(db, tmp_path / "js", orientation="kmer",
+                                    full=True)
+
+    doc = json.loads(written["by_kmer"].read_text())
+    assert doc["genomes"] == db.genome_names, "names appear once, at the top"
+    assert doc["members"] is True
+    assert len(doc["partitions"]) == db.n_partitions
+
+    # Every posting is an ordinal into that list, not a repeated name.
+    for part in doc["partitions"]:
+        for kmers in part["accessions"].values():
+            for members in kmers.values():
+                assert all(0 <= g < db.n_genomes for g in members)
+
+
+def test_by_kmer_counts_only_when_not_full(tmp_path):
+    import json
+
+    prots = [_protein_file(tmp_path, "k0")]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "kk"),
+                            save=False, processes=1)
+    written = fastaai.dump_database(db, tmp_path / "kc", orientation="kmer")
+    doc = json.loads(written["by_kmer"].read_text())
+    assert doc["members"] is False
+    counts = [v for p in doc["partitions"] for a in p["accessions"].values()
+              for v in a.values()]
+    assert counts and all(isinstance(v, int) for v in counts)
+
+    genomes = written["genomes"].read_text().splitlines()
+    assert genomes[0] == "genome\tpartition\tlocal_id\tn_markers"
+    assert len(genomes) == 1 + db.n_genomes
+
+
+def test_dump_rejects_an_unknown_orientation(tmp_path):
+    prots = [_protein_file(tmp_path, "f0")]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "ff"),
+                            save=False, processes=1)
+    with pytest.raises(ValueError, match="orientation"):
+        fastaai.dump_database(db, tmp_path / "x", orientation="sideways")
+
+
+def test_describe_database_reports_the_schema(tmp_path):
+    prots = [_protein_file(tmp_path, f"g{i}") for i in range(2)]
+    db = fastaai.preprocess(proteins=prots, directory=str(tmp_path / "gg"),
+                            save=False, processes=1)
+    info = fastaai.describe_database(db)
+    assert info["genomes"] == db.n_genomes
+    assert info["k"] == db.k
+    assert info["models"] == db.models
+    assert info["alphabet"] == db.alphabet
+
+
+def test_database_lands_directly_in_the_database_directory(tmp_path):
+    """`<root>/database/` *is* the database — no name level in between, so the
+    path can be handed straight back to a query."""
+    prots = [_protein_file(tmp_path, f"p{i}") for i in range(2)]
+    root = tmp_path / "flat"
+    fastaai.preprocess(proteins=prots, directory=str(root), processes=1)
+
+    assert (root / "database" / "schema").exists()
+    assert not (root / "database" / "database").exists(), "no stutter"
+    assert fastaai.open_database(str(root / "database")).n_genomes == 2
+
+
+def test_naming_a_database_adds_levels_beneath(tmp_path):
+    prots = [_protein_file(tmp_path, "q0")]
+    root = tmp_path / "named"
+    fastaai.preprocess(proteins=prots, directory=str(root), database="alt/run2",
+                       processes=1)
+    assert (root / "database" / "alt" / "run2" / "schema").exists()
+
+
+def test_an_absolute_database_path_escapes_the_root(tmp_path):
+    prots = [_protein_file(tmp_path, "r0")]
+    elsewhere = tmp_path / "elsewhere" / "db"
+    fastaai.preprocess(proteins=prots, directory=str(tmp_path / "root2"),
+                       database=str(elsewhere), processes=1)
+    assert (elsewhere / "schema").exists()

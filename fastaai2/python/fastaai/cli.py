@@ -5,9 +5,10 @@ Two verbs replace FastAAI 1's seven modules:
     fastaai build   inputs -> a database
     fastaai query   database x database -> AAI
 
-plus one that computes nothing and only moves data between preprocessing ranks:
+plus two that compute nothing:
 
     fastaai crystallize   proteins + hits -> crystals
+    fastaai inspect       a database -> readable text
 
 There is no merge. Combining sealed databases preserved each donor's
 partitioning, which fragments the index; putting crystals together and
@@ -285,9 +286,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     b = sub.add_parser("build", help="build a database from genomes or proteins")
     b.add_argument("inputs", help="FASTA file or directory")
-    b.add_argument("-d", "--database", default="database",
-                   help="database name, placed in <dir>/database/ (default: "
-                        "'database'). A path with a separator is taken literally")
+    b.add_argument("-d", "--database", default=None,
+                   help="by default the database is written to <dir>/database/. "
+                        "Give a name to add levels beneath that, or an absolute "
+                        "path to put it elsewhere")
     b.add_argument("--source", default="", help="provenance label, e.g. 'GTDB R232 bac120'")
     _common(b)
 
@@ -302,6 +304,22 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--output_style", choices=("tsv", "matrix"), default="tsv")
     q.add_argument("--emit", choices=("aai", "jaccard", "both"), default="both")
     _common(q)
+
+    i = sub.add_parser("inspect",
+                       help="write a database out as readable text")
+    i.add_argument("database", help="database directory")
+    i.add_argument("-o", "--output", help="directory for the text files "
+                                          "(default: <database>/../inspect)")
+    i.add_argument("--by", dest="orientation", default="both",
+                   choices=("genome", "kmer", "both"),
+                   help="genome: what each genome contains, which lines up with "
+                        "its crystal. kmer: the CSR as stored, which genomes "
+                        "share a k-mer (default: both)")
+    i.add_argument("--full", action="store_true",
+                   help="list every member rather than a count, reconstructing "
+                        "the index exactly. Large: tens of millions of rows at "
+                        "GTDB scale")
+    i.add_argument("--quiet", action="store_true")
 
     c = sub.add_parser("crystallize",
                        help="emit crystals from an existing archive")
@@ -403,6 +421,24 @@ def cmd_query(args) -> int:
     log(f"search {kernel:.2f}s ({per_thread:,.0f} pairs/s/thread, "
         f"{args.threads} threads){tail}"
         f"{' [symmetric, upper triangle]' if same else ''}")
+    return 0
+
+
+def cmd_inspect(args) -> int:
+    """The readable view of a packed binary database."""
+    from .api import dump_database
+
+    log = _log(args.quiet)
+    db = _core.open_database(args.database)
+    out = Path(args.output) if args.output else Path(args.database).parent / "inspect"
+    written = dump_database(db, out, orientation=args.orientation, full=args.full)
+    log(f"{args.database}: {db.n_genomes} genomes, {db.n_partitions} partition(s), "
+        f"{len(db.accession_names)} accessions")
+    log(f"  wrote {out}/")
+    for key, path in written.items():
+        if key != "rows":
+            n = written["rows"].get(key.replace("by_", ""))
+            log(f"    {path.name}" + (f"  {n:,} rows" if n else ""))
     return 0
 
 
@@ -541,7 +577,8 @@ def main(argv: list[str] | None = None) -> int:
         if getattr(args, flag, False) and not quiet:
             print(f"note: --{flag} no longer applies — {why}", file=sys.stderr)
     return {"build": cmd_build, "query": cmd_query,
-            "crystallize": cmd_crystallize}[args.command](args)
+            "crystallize": cmd_crystallize,
+            "inspect": cmd_inspect}[args.command](args)
 
 
 if __name__ == "__main__":

@@ -404,6 +404,182 @@ impl Database {
         .map_err(to_py)
     }
 
+
+    /// Write the index as text, in either orientation.
+    ///
+    /// The stored form is inverted — k-mer to genomes — because that is what the
+    /// counting kernel reads. Both directions are useful to a person, and they
+    /// answer different questions, so both are available:
+    ///
+    /// * `"genome"` transposes back to per-genome k-mer sets: what does this
+    ///   genome contain? One row per (genome, accession). This is the view that
+    ///   lines up with a crystal.
+    /// * `"kmer"` emits the CSR as stored: which genomes share this k-mer? One
+    ///   row per (partition, accession, k-mer). No transpose, so it is the
+    ///   cheaper of the two and it shows the actual storage. Rows are keyed by
+    ///   partition because a posting list is partition-local — the same k-mer id
+    ///   in two partitions is two independent lists.
+    ///
+    /// With *full* false the member column is omitted and each row is a count,
+    /// which is what "what is in here" needs. With it true every member is
+    /// listed and the file reconstructs the index exactly — tens of millions of
+    /// rows at GTDB scale, which is why Rust writes it rather than Python.
+    #[pyo3(signature = (path, orientation = "genome", full = false))]
+    fn write_dump(&self, path: &str, orientation: &str, full: bool) -> PyResult<usize> {
+        use std::io::Write as _;
+
+        let by_kmer = match orientation {
+            "genome" => false,
+            "kmer" => true,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "orientation must be 'genome' or 'kmer', not {other:?}"
+                )))
+            }
+        };
+
+        let file = std::fs::File::create(path).map_err(to_py)?;
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
+        if by_kmer {
+            // The genome names appear once here; everything below refers to
+            // them by ordinal.
+            let mut head = String::from("{\n  \"genomes\": [");
+            for (i, n) in self.names.iter().enumerate() {
+                if i > 0 {
+                    head.push(',');
+                }
+                json_str(&mut head, n);
+            }
+            head.push_str("],\n  \"members\": ");
+            head.push_str(if full { "true" } else { "false" });
+            head.push_str(",\n  \"partitions\": [\n");
+            w.write_all(head.as_bytes()).map_err(to_py)?;
+        } else {
+            let head = if full {
+                "genome\taccession\tn_kmers\tkmers\n"
+            } else {
+                "genome\taccession\tn_kmers\n"
+            };
+            w.write_all(head.as_bytes()).map_err(to_py)?;
+        }
+
+        let mut rows = 0usize;
+        let mut start = 0usize;
+        let mut line = String::with_capacity(256);
+
+        for pi in 0..self.n_parts() {
+            let part = self.part(pi).map_err(to_py)?;
+
+            if by_kmer {
+                // Nested rather than tabular: a flat table repeats the partition
+                // and accession on every row, which for a real database is most
+                // of the file. Here each appears once and a k-mer's genomes are
+                // ordinals into the single `genomes` list at the top.
+                if pi > 0 {
+                    w.write_all(b",\n").map_err(to_py)?;
+                }
+                let _ = std::fmt::Write::write_fmt(
+                    &mut line, format_args!(""));
+                line.clear();
+                line.push_str(&format!("  {{\"partition\": {pi}, \"accessions\": {{"));
+                w.write_all(line.as_bytes()).map_err(to_py)?;
+
+                let mut first_acc = true;
+                for (ai, acc) in part.accs.iter().enumerate() {
+                    if acc.kmers.is_empty() {
+                        continue;
+                    }
+                    line.clear();
+                    if !first_acc {
+                        line.push(',');
+                    }
+                    first_acc = false;
+                    line.push_str("\n    ");
+                    json_str(&mut line, &self.accessions[ai]);
+                    line.push_str(": {");
+                    for (slot, &kmer) in acc.kmers.iter().enumerate() {
+                        let (lo, hi) = (acc.offsets[slot] as usize,
+                                        acc.offsets[slot + 1] as usize);
+                        if slot > 0 {
+                            line.push(',');
+                        }
+                        let _ = std::fmt::Write::write_fmt(
+                            &mut line, format_args!("\"{kmer}\":"));
+                        if full {
+                            line.push('[');
+                            for (i, &g) in acc.postings[lo..hi].iter().enumerate() {
+                                if i > 0 {
+                                    line.push(',');
+                                }
+                                let _ = std::fmt::Write::write_fmt(
+                                    &mut line, format_args!("{}", start + g as usize));
+                            }
+                            line.push(']');
+                        } else {
+                            let _ = std::fmt::Write::write_fmt(
+                                &mut line, format_args!("{}", hi - lo));
+                        }
+                        rows += 1;
+                        if line.len() > (1 << 16) {
+                            w.write_all(line.as_bytes()).map_err(to_py)?;
+                            line.clear();
+                        }
+                    }
+                    line.push('}');
+                    w.write_all(line.as_bytes()).map_err(to_py)?;
+                }
+                w.write_all(b"}}").map_err(to_py)?;
+            } else {
+                // Transpose: walk each k-mer's posting run and hand the k-mer to
+                // every genome in it. One pass, bounded by this partition.
+                let mut per_genome: Vec<Vec<u32>> =
+                    vec![Vec::new(); part.n_genomes * part.n_acc];
+                for (ai, acc) in part.accs.iter().enumerate() {
+                    for (slot, &kmer) in acc.kmers.iter().enumerate() {
+                        let (lo, hi) = (acc.offsets[slot] as usize,
+                                        acc.offsets[slot + 1] as usize);
+                        for &g in &acc.postings[lo..hi] {
+                            per_genome[g as usize * part.n_acc + ai].push(kmer);
+                        }
+                    }
+                }
+                for g in 0..part.n_genomes {
+                    for ai in 0..part.n_acc {
+                        let set = &per_genome[g * part.n_acc + ai];
+                        if set.is_empty() {
+                            continue;
+                        }
+                        line.clear();
+                        line.push_str(&self.names[start + g]);
+                        line.push('\t');
+                        line.push_str(&self.accessions[ai]);
+                        let _ = std::fmt::Write::write_fmt(
+                            &mut line, format_args!("\t{}", set.len()));
+                        if full {
+                            line.push('\t');
+                            for (i, k) in set.iter().enumerate() {
+                                if i > 0 {
+                                    line.push(',');
+                                }
+                                let _ = std::fmt::Write::write_fmt(
+                                    &mut line, format_args!("{k}"));
+                            }
+                        }
+                        line.push('\n');
+                        w.write_all(line.as_bytes()).map_err(to_py)?;
+                        rows += 1;
+                    }
+                }
+            }
+            start += part.n_genomes;
+        }
+        if by_kmer {
+            w.write_all(b"\n  ]\n}\n").map_err(to_py)?;
+        }
+        w.flush().map_err(to_py)?;
+        Ok(rows)
+    }
+
     /// Index footprint in bytes, or 0 if unsealed. For a streamed database this
     /// is what the index *would* occupy resident, not what it currently does.
     fn index_bytes(&self) -> PyResult<usize> {
@@ -935,6 +1111,28 @@ impl Database {
         written.map_err(to_py)
     }
 }
+
+/// Append *v* as a JSON string. Names come from FASTA headers and filenames, so
+/// a quote or a backslash is unlikely but not impossible, and an unescaped one
+/// would silently produce a file no parser can read.
+fn json_str(out: &mut String, v: &str) {
+    out.push('"');
+    for c in v.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
 
 fn to_py(e: std::io::Error) -> PyErr {
     PyRuntimeError::new_err(e.to_string())

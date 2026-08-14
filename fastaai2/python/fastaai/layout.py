@@ -155,16 +155,21 @@ class Layout:
     def results(self) -> Path:
         return self.sub(RESULTS)
 
-    def database_path(self, name: str) -> Path:
-        """Where a database called *name* lives.
+    def database_path(self, name=None) -> Path:
+        """Where the database goes.
 
-        A bare name goes under `<root>/database/`, which is what makes `-d`
-        mean "call it this" rather than "put it exactly here". A name carrying a
-        path separator is taken literally, so an explicit location always wins.
+        `<root>/database/` **is** the database — its schema, manifest and
+        partition files sit directly there, with no name level in between. One
+        run, one database, and `FastAAI/database` is a path you can hand
+        straight back to `query`.
+
+        *name* adds levels beneath it for anyone who wants more than one, and an
+        absolute path escapes the root entirely.
         """
-        if os.sep in str(name) or (os.altsep and os.altsep in str(name)):
-            return Path(name)
-        return self.database / name
+        if not name:
+            return self.database
+        p = Path(name)
+        return p if p.is_absolute() else self.database / p
 
     def __repr__(self) -> str:
         return f"Layout({str(self.root)!r}, compress={self.compress})"

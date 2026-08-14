@@ -111,6 +111,11 @@ there are no temporary directories anywhere in this codebase.
    a search adds ─────────────────►  <root>/results/block_qNNNNN_tNNNNN.tsv
 ```
 
+The database is packed binary. `fastaai inspect <database>` writes it back out
+as text — the schema, the genome and accession tables, and the index in either
+direction: `by_genome.tsv` for what a genome contains, `by_kmer.json` for which
+genomes share a k-mer, which is the form it is actually stored in.
+
 One file per genome per rank, in standard formats. No tar, no single table
 covering the collection, no nesting past that one level — a directory of
 per-genome files can be listed, subsetted and inspected with ordinary tools, and
@@ -511,7 +516,7 @@ unverifiable rather than treated as a conflict.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 264 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 273 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.
