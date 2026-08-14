@@ -76,3 +76,10 @@ about:
     SCPs by default, and GTDB's bac120 and ar53 via --hmm gtdb-bact, gtdb-arch
     or gtdb-all. The GTDB sets are assembled from Pfam and TIGRFAM rather than
     copied from GTDB-Tk, and do not reproduce GTDB's trees.
+
+extra:
+  # Who maintains the *recipe*, not who wrote the software — bioconda pings
+  # these accounts on every bot PR and version bump, so it lists only people
+  # who have agreed to that. Authors are in the package metadata.
+  recipe-maintainers:
+    - KGerhardt

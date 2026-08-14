@@ -12,7 +12,14 @@ license = "GPL-3.0-or-later"
 # A copy of the repo-root LICENSE: license-files cannot reference a parent
 # directory, and the package must carry its own license to be installable.
 license-files = ["LICENSE"]
-authors = [{ name = "Kenji Gerhardt" }]
+# The 1.5 engine is Kenji Gerhardt's, but this package is the bioconda home for
+# FastAAI as a whole, so it carries FastAAI 1's authors too.
+authors = [
+    { name = "Kenji Gerhardt" },
+    { name = "Carlos Ruiz-Perez" },
+    { name = "Luis Miguel Rodriguez-Rojas" },
+    { name = "Konstantinos Konstantinidis" },
+]
 classifiers = [
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
