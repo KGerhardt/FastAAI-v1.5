@@ -284,7 +284,7 @@ The three sets agree closely enough that there is no accuracy reason to prefer
 one over another; choose on which markers your other tooling already produces.
 See `fastaai2/methods/marker_sets.md` for the comparison.
 
-## tSV format
+## TSV format
 
 **The TSV is FastAAI 1's, unchanged** - same columns, same names, same order, so
 a parser written against v1 keeps working:
