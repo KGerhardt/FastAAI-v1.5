@@ -18,7 +18,7 @@ Python's parallelism.
 
 ## Goals:
 
-The purposes of this codebase are: (1) a stable release for FastAAI v1 to serve as the basis for future bioconda installation. (2) A version of the program able to run within reasonable RAM limits for a personal computer on any size of database, while scaling effectively to any HPC platform. (3) It is a Single Copy Protein (SCP)-agnostic revision of the code, able to work with other sets of universal marker genes and not just the specific set selected in FastAAI v1, (4) Preparation for a FastAAI 2, intended to work as a complementary search engine inside GTDB-tk.
+The purposes of this codebase are: (1) a stable release of FastAAI to serve as the basis for bioconda installation. (2) A version of the program able to run within reasonable RAM limits for a personal computer on any size of database, while scaling effectively to any HPC platform. (3) A Single Copy Protein (SCP)-agnostic revision of the code, able to work with other sets of universal marker genes and not just the specific set selected in FastAAI v1.
 
 ## Performance
 
@@ -330,11 +330,9 @@ assembled from Pfam and TIGRFAM rather than copied from GTDB-Tk, and the pinned
 Pfam versions have since moved on, so they benchmark the engine but **do not
 reproduce GTDB's trees** — see `python/fastaai/data/README.md`.
 
-On 2,943 genomes scored against GTDB R232 taxonomy, retrieval is saturated for
-all three: same-genus top-1 is 99.04% for the default set, 99.16% for bac120 and
-98.79% for ar53 — the last on the seven of 53 archaeal markers a bacterium
-carries. There is no accuracy reason to switch; the reason is shared
-preprocessing with GTDB-Tk, whose identify step already runs these searches.
+The three sets agree closely enough that there is no accuracy reason to prefer
+one over another; choose on which markers your other tooling already produces.
+See `fastaai2/methods/marker_sets.md` for the comparison.
 
 Results are written one block per query/target partition pair, so a search
 spanning more than one pair needs `-o` to name a directory rather than a file —
