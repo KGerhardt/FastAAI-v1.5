@@ -443,3 +443,13 @@ def test_tsv_and_matrix_agree_on_the_diagonal(tmp_path):
     names = lines[0].split("\t")[1:]
     assert diag == {n for i, n in enumerate(names)
                     if lines[1 + i].split("\t")[1 + i] == "100.0"}
+
+
+def test_a_database_smaller_than_one_kernel_block_writes(tmp_path):
+    """Output is produced in bands of `threads * block` rows, and the band must
+    never be wider than the block itself — every database smaller than one
+    kernel block hits that, and clamping the wrong way round panicked."""
+    p = _saved(tmp_path, "tiny", 3)
+    out = tmp_path / "tiny.tsv"
+    main(["query", "-q", p, "-o", str(out), "--quiet"])
+    assert len(out.read_text().splitlines()) == 1 + 9

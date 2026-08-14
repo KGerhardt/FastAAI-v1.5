@@ -237,9 +237,40 @@ pub fn join_threaded(
     shared: &mut [u32],
     sumsq: Option<&mut [f64]>,
 ) {
-    let (nq, nt) = (qp.n_genomes, tp.n_genomes);
-    let threads = threads.max(1).min(nq.max(1));
-    let per = nq.div_ceil(threads);
+    let nq = qp.n_genomes;
+    join_rows_threaded(qp, tp, 0, nq, block, threads, symmetric, jaccard, shared, sumsq)
+}
+
+/// The same, over a slice of query rows.
+///
+/// The output buffers hold `(qhi - qlo) * nt` and are indexed from zero, so a
+/// caller can compute a band of rows into a small buffer, write them out and
+/// reuse it. That is what keeps a full-size block off the heap: at 16,384 square
+/// the whole matrix is 5 GiB with standard deviations, against 336 MiB for a
+/// 1,024-row band.
+///
+/// *symmetric* is only sound when the whole matrix is resident, because the
+/// lower triangle is filled by mirroring rows computed earlier. A banded caller
+/// has already discarded those, so it passes false and computes both triangles.
+pub fn join_rows_threaded(
+    qp: &Partition,
+    tp: &Partition,
+    qlo: usize,
+    qhi: usize,
+    block: usize,
+    threads: usize,
+    symmetric: bool,
+    jaccard: &mut [f64],
+    shared: &mut [u32],
+    sumsq: Option<&mut [f64]>,
+) {
+    let nt = tp.n_genomes;
+    let rows = qhi.saturating_sub(qlo);
+    if rows == 0 {
+        return;
+    }
+    let threads = threads.max(1).min(rows);
+    let per = rows.div_ceil(threads);
 
     let jchunks: Vec<&mut [f64]> = jaccard.chunks_mut(per * nt).collect();
     let schunks: Vec<&mut [u32]> = shared.chunks_mut(per * nt).collect();
@@ -254,7 +285,7 @@ pub fn join_threaded(
 
     std::thread::scope(|sc| {
         for (i, ((jc, scn), qc)) in jchunks.into_iter().zip(schunks).zip(qchunks).enumerate() {
-            let (qs, qe) = (i * per, ((i + 1) * per).min(nq));
+            let (qs, qe) = (qlo + i * per, (qlo + (i + 1) * per).min(qhi));
             if qs >= qe {
                 continue;
             }

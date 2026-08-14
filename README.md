@@ -404,7 +404,7 @@ and the intermediates read back off disk.
 
 Working end to end: on-disk partitioned databases, the three stored
 preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 273 Python and 53
+optional per-pair Jaccard standard deviation (`--do_stdev`). 274 Python and 53
 Rust tests.
 
 Not yet packaged for bioconda.

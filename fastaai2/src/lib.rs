@@ -220,6 +220,48 @@ impl Database {
     }
 }
 
+/// Compute one band of rows of a block, into caller-owned buffers.
+///
+/// The banded counterpart to `block_values`. It never mirrors and never fills a
+/// diagonal, because with `symmetric = false` the kernel computes both
+/// triangles and the diagonal directly — a genome against itself shares every
+/// k-mer of every marker it carries, which is the same 1.0 the mirror path
+/// wrote by hand.
+///
+/// That is the trade this band makes: 1.52x more kernel work on a *self*-block,
+/// measured, against holding `rows * nt` instead of `nq * nt`. Cross-blocks pay
+/// nothing, having no symmetry to give up, and self-blocks are only the diagonal
+/// of the block grid — at nine partitions, about 11% of total work.
+fn band_values(
+    qp: &Partition,
+    tpr: &Partition,
+    qlo: usize,
+    qhi: usize,
+    block: usize,
+    threads: usize,
+    stdev: bool,
+    jac: &mut [f64],
+    sh: &mut [u32],
+    sq: &mut [f64],
+) {
+    let nt = tpr.n_genomes;
+    let cells = (qhi - qlo) * nt;
+
+    kernel::join_rows_threaded(
+        qp, tpr, qlo, qhi, block, threads, false, &mut jac[..cells],
+        &mut sh[..cells],
+        if stdev { Some(&mut sq[..cells]) } else { None },
+    );
+    if stdev {
+        for i in 0..cells {
+            sq[i] = kernel::stdev_from(jac[i], sq[i], sh[i]);
+        }
+    }
+    for i in 0..cells {
+        jac[i] = if sh[i] == 0 { f64::NAN } else { jac[i] / sh[i] as f64 };
+    }
+}
+
 /// One computed `q x t` block, reduced to final values.
 struct Block {
     jac: Vec<f64>,
@@ -970,9 +1012,35 @@ impl Database {
 
         let written = py.detach(|| -> std::io::Result<(usize, f64)> {
             let t0 = std::time::Instant::now();
-            let Block { jac, sh, sq, nq, nt, qcounts, tcounts, selfblock } =
-                self.block_values(target, qi, ti, block, threads, stdev)?;
-            let compute = t0.elapsed().as_secs_f64();
+            // Rows are produced in bands and written as each finishes, so the
+            // heap holds `WAVE * nt` rather than the whole block.
+            let selfblock =
+                std::ptr::eq(self as *const Database, target as *const Database) && qi == ti;
+            let qp = self.part(qi)?;
+            let tp = if selfblock { None } else { Some(target.part(ti)?) };
+            let tpr: &Partition = match &tp {
+                Some(p) => p,
+                None => &qp,
+            };
+            let (nq, nt) = (qp.n_genomes, tpr.n_genomes);
+            let count = |p: &Partition, g: usize| {
+                p.accs.iter().filter(|a| a.present[g]).count() as u32
+            };
+            let qcounts: Vec<u32> = (0..nq).map(|g| count(&qp, g)).collect();
+            let tcounts: Vec<u32> = (0..nt).map(|g| count(tpr, g)).collect();
+
+            // Wide enough that every thread still gets whole kernel blocks, so
+            // banding costs no parallelism; narrow enough that the buffer is
+            // megabytes rather than gigabytes.
+            // Never wider than the block itself: `clamp` would panic when the
+            // floor exceeded the ceiling, which is every database smaller than
+            // one kernel block.
+            let wave = (threads.max(1) * block.max(1)).min(nq.max(1)).max(1);
+            let mut jac = vec![0.0f64; wave * nt];
+            let mut sh = vec![0u32; wave * nt];
+            let mut sq = if stdev { vec![0.0f64; wave * nt] } else { Vec::new() };
+            let mut compute = 0.0f64;
+            let _ = t0;
 
             // Temp name carries the pid. Two processes told to write the same
             // block would otherwise open the same file, interleave their rows
@@ -1003,11 +1071,18 @@ impl Database {
                 line.push('\n');
                 std::io::Write::write_all(&mut w, line.as_bytes())?;
 
-                for r in 0..nq {
+                let mut wlo = 0usize;
+                while wlo < nq {
+                  let whi = (wlo + wave).min(nq);
+                  let tb = std::time::Instant::now();
+                  band_values(&qp, tpr, wlo, whi, block, threads, stdev,
+                              &mut jac, &mut sh, &mut sq);
+                  compute += tb.elapsed().as_secs_f64();
+                  for r in wlo..whi {
                     line.clear();
                     line.push_str(&self.names[qstart + r]);
                     for c in 0..nt {
-                        let idx = r * nt + c;
+                        let idx = (r - wlo) * nt + c;
                         let j = jac[idx];
                         line.push('\t');
                         if selfblock && r == c {
@@ -1021,6 +1096,8 @@ impl Database {
                     }
                     line.push('\n');
                     std::io::Write::write_all(&mut w, line.as_bytes())?;
+                  }
+                  wlo = whi;
                 }
                 std::io::Write::flush(&mut w)?;
                 drop(w);
@@ -1047,10 +1124,17 @@ impl Database {
             // One reusable line buffer: 268M allocations per block is the thing
             // this function exists to avoid.
             let mut line = String::with_capacity(128);
-            for r in 0..nq {
+            let mut wlo = 0usize;
+            while wlo < nq {
+              let whi = (wlo + wave).min(nq);
+              let tb = std::time::Instant::now();
+              band_values(&qp, tpr, wlo, whi, block, threads, stdev,
+                          &mut jac, &mut sh, &mut sq);
+              compute += tb.elapsed().as_secs_f64();
+              for r in wlo..whi {
                 let qname = &self.names[qstart + r];
                 for c in 0..nt {
-                    let idx = r * nt + c;
+                    let idx = (r - wlo) * nt + c;
                     let (j, s) = (jac[idx], sh[idx]);
                     // v1 blanks every value column when a pair shares no
                     // accession: there is no measurement, not a measurement of
@@ -1100,6 +1184,8 @@ impl Database {
                     line.push('\n');
                     std::io::Write::write_all(&mut w, line.as_bytes())?;
                 }
+              }
+              wlo = whi;
             }
             std::io::Write::flush(&mut w)?;
             drop(w);
