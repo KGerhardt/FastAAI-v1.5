@@ -387,7 +387,7 @@ fastaai crystallize old_run/              # or from proteins and hits you alread
 fastaai build FastAAI/crystals            # rebuild, no prediction or search
 ```
 
-When crystalized, the 2,943 Firmicutes genomes are ~88MB unzipped and ~26MB zipped.
+When crystalized, the 2,943 Firmicutes genomes are ~86MB unzipped and ~32MB zipped.
 Rebuilding a 112 MB FastAAI database from it takes **5 s** - against
 roughly two CPU-hours to preprocess the same genomes. All 8,661,250 pairs agree
 with the database built directly from the stored hits. The database is 63MB zipped.
