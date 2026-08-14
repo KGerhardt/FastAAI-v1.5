@@ -227,8 +227,9 @@ v1.5 writes one file per (query partition × target partition) block:
 ```
 
 This is true for both the TSV and matrix output formats. The Python API includes search 
-functions to extract single genome information, and there is a helper function to produce the same per-genome
-one-vs-all TSVs as before.
+functions to extract single genome information, and there are helper functions to produce 
+the same per-genome one-vs-all TSVs as before, as well as converting TSVs to a matrix (the
+reverse direction is not possible because the matrices hold only a subset of information.)
 
 ## Install
 
@@ -323,11 +324,10 @@ Only a genome against *itself* is exempt. Two distinct genomes that happen to be
 identical are a measurement that came out at the ceiling, and still read `95.0`
 in the matrix and `>90%` in the TSV - equality of content is not identity.
 
-Three deliberate departures from v1: a pair sharing no marker is `N/A` in the
-matrix where v1 writes `0`, which cannot be told from a real measurement of
-zero; `poss_shared_SCPs` uses the `minimum` of v1's three bulk paths rather than
-the `max` of its one scalar path; and a genome against itself reports `100`
-where v1 reports `>90%`.
+Two deliberate departures from v1: (1) a pair sharing no marker is `N/A` in the
+matrix where v1 writes `0`, which cannot be differentiated from a real 
+measurement of zero, and (2) a genome against itself reports `100`
+where v1 reports `>90%` to indicate genuine identity.
 
 **FastAAI 1 command lines still work.** `build_db`, `db_query`, `aai_index`,
 `single_query`, `multi_query` and `simple_query` are rerouted to the new verbs,
