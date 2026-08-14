@@ -535,15 +535,6 @@ with arguments preserved where they still mean something and a diagnostic where
 they do not. `merge_db` is the one that no longer has a target: it exits saying
 so and gives the crystal-and-rebuild replacement.
 
-## Status
-
-Working end to end: on-disk partitioned databases, the three stored
-preprocessing ranks, crystal-driven builds, the FastAAI 1 compatible CLI, and
-optional per-pair Jaccard standard deviation (`--do_stdev`). 291 Python and 53
-Rust tests.
-
-Not yet packaged for bioconda.
-
 ## Dependencies
 
 `pyrodigal`, `pyhmmer`, `pyfastx`, `numpy`. 
