@@ -22,7 +22,7 @@ package:
   version: ${{ version }}
 
 source:
-  path: ../fastaai2
+  path: ../fastaai1_5
 
 build:
   number: 0

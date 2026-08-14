@@ -1,11 +1,11 @@
 # Prototype — frozen
 
-**This is not the engine.** The shipped engine is `../fastaai2/`. Nothing here is
+**This is not the engine.** The shipped engine is `../fastaai1_5/`. Nothing here is
 built, imported or tested by the package, and none of it is maintained.
 
 It is kept because it is the only runnable record of the alternatives that were
 measured and rejected. Every performance claim in the READMEs and in
-`../FASTAAI2_PLAN.md` was produced here, and deleting it would turn those numbers
+`../FASTAAI1_5_PLAN.md` was produced here, and deleting it would turn those numbers
 into assertions nobody can check.
 
 ## What it measured
@@ -40,7 +40,7 @@ canonical amino acids. This does not affect the table above, which is entirely
 
 **The code has diverged.** `kernel.rs` here still contains the retired per-query
 kernel alongside the join; `kmer.rs`, `index.rs` and `aai.rs` are all earlier,
-smaller versions of their counterparts. Read `../fastaai2/src/` for how anything
+smaller versions of their counterparts. Read `../fastaai1_5/src/` for how anything
 actually works.
 
 ## Running it

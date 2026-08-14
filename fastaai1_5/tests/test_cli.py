@@ -216,6 +216,23 @@ def test_absent_optional_v1_flags_do_not_reach_argv():
         assert None not in _reroute(argv), argv
 
 
+def test_v1_archive_becomes_dir():
+    """`--archive` was carried through to a parser that never defined it.
+
+    The reroute built the new command line from scratch, so an undefined flag
+    landing in argv made argparse reject the whole thing — the one outcome
+    rerouting exists to prevent. v1.5 always writes the store, and `--dir`
+    names the root holding it, so the flag translates.
+    """
+    got = _reroute(["build_db", "-g", "/in", "--archive", "/arch"])
+    assert "--archive" not in got, "a flag the new parser does not define"
+    assert got[got.index("--dir") + 1] == "/arch"
+
+    # Every accepted v1 command line must parse. Nothing may reach argparse
+    # that argparse does not know.
+    build_parser().parse_args(got)
+
+
 def test_a_v1_self_query_without_target_still_runs(tmp_path):
     path, _db_obj = _db(tmp_path, "db", n=4)
     main(["db_query", "-q", path, "-o", str(tmp_path / "out.tsv")])

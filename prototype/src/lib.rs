@@ -1,4 +1,4 @@
-//! FastAAI 2 engine prototype — dense kmer encoding, partition-local inverted
+//! FastAAI 1.5 engine prototype — dense kmer encoding, partition-local inverted
 //! index, and three counting kernels for comparison.
 //!
 //! Targets FastAAI v1's fixed 122-accession SCP set so results can be checked

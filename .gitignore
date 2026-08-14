@@ -17,7 +17,7 @@ dist/
 #
 # NOTE the leading slash. Unanchored `FastAAI/` matches a directory of that name
 # at any depth, and on a case-insensitive filesystem it also swallows
-# `fastaai2/python/fastaai/` — silently excluding the entire Python package.
+# `fastaai1_5/python/fastaai/` — silently excluding the entire Python package.
 /FastAAI/
 
 # Compiled extension module (built by maturin)

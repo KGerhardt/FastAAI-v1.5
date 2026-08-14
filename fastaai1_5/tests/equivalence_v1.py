@@ -1,4 +1,4 @@
-"""Equivalence harness: FastAAI 2 against FastAAI 1 on the same genomes.
+"""Equivalence harness: FastAAI 1.5 against FastAAI 1 on the same genomes.
 
 Run as a script, not under pytest — it needs a v1 output file and a crystal
 set. The crystals are published alongside the release as a tar.gz, so the
@@ -11,7 +11,7 @@ The v1-compatible run passes `alphabet=V1_ALPHABET` so the 21-symbol alphabet is
 applied at k-merisation. Crystals hold sequences, not k-mers, so a single
 crystal set serves both runs.
 
-FastAAI 2 differs from v1 in one place that changes numbers: **v2 excludes the
+FastAAI 1.5 differs from v1 in one place that changes numbers: **v1.5 excludes the
 stop codon `*` from the k-mer alphabet, and v1 does not.**
 
 That is a *fix*, not a deviation. v1 has two k-merizers. `unique_kmers`
@@ -31,7 +31,7 @@ on 4,017 of them.
 The harness therefore runs twice:
 
   bug-compatible   21-symbol alphabet. Reproduces v1 *including* its stop-codon
-                   bug. Any difference here is a fault in FastAAI 2 — this is the
+                   bug. Any difference here is a fault in FastAAI 1.5 — this is the
                    pass that proves the engine correct.
   shipped          20-symbol alphabet. The difference from the first pass is the
                    size of the correction, measured rather than assumed.
@@ -72,7 +72,7 @@ def load_v1(results_dir: Path) -> dict[tuple[str, str], tuple[float, int]]:
                 j, n = row["avg_jacc_sim"], row["num_shared_SCPs"]
                 if j == "N/A":
                     continue
-                # v1 keys on the full filename; v2 strips FASTA and compression
+                # v1 keys on the full filename; v1.5 strips FASTA and compression
                 # suffixes. Normalise so the two agree on identity.
                 out[(genome_name(row["query"]), genome_name(row["target"]))] = (
                     float(j), int(n))
@@ -124,14 +124,14 @@ def main() -> int:
     subset = {q for q, _ in v1} | {t for _, t in v1}
     print(f"v1: {len(v1):,} pairs over {len(subset)} genomes")
 
-    print("\nbuilding v2 with v1-compatible settings "
+    print("\nbuilding v1.5 with v1-compatible settings "
           f"(alphabet={V1_ALPHABET!r}, filter=v1) ...")
     db = build_from_crystals(crystals, models, alphabet=V1_ALPHABET, only=subset)
     compat = search(db, db, threads=8)
-    a = compare("bug-compatible — any difference here is a FastAAI 2 fault", v1,
+    a = compare("bug-compatible — any difference here is a FastAAI 1.5 fault", v1,
                 compat, db.genome_names)
 
-    print("\nbuilding v2 with shipped settings (20-symbol alphabet, filter=v1) ...")
+    print("\nbuilding v1.5 with shipped settings (20-symbol alphabet, filter=v1) ...")
     db2 = build_from_crystals(crystals, models, only=subset)
     shipped = search(db2, db2, threads=8)
     b = compare("shipped — difference here is the size of the stop-codon fix",

@@ -1,4 +1,4 @@
-# fastaai2 — the package
+# fastaai1_5 — the package
 
 The Rust core, the PyO3 bindings and the Python package. **Installation and
 usage are in the [repository README](../README.md);** this file is the

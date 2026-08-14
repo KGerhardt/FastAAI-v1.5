@@ -9,7 +9,7 @@ source:
   # Local build, for testing an install before anything is published. A
   # submitted bioconda recipe replaces this with a url + sha256 of a release
   # tarball; nothing else here needs to change.
-  path: ../fastaai2
+  path: ../fastaai1_5
 
 build:
   number: 0

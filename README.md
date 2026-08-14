@@ -19,7 +19,7 @@ Some additional conveniences have been added, primarily in the form of an API fo
 ## Install
 
 ```sh
-cd fastaai2
+cd fastaai1_5
 maturin develop --release      # or: pip install .
 ```
 
@@ -422,7 +422,7 @@ reproduce GTDB's trees** - see `python/fastaai/data/README.md`.
 
 The three sets agree closely enough that there is no accuracy reason to prefer
 one over another; choose on which markers your other tooling already produces.
-See `fastaai2/methods/marker_sets.md` for the comparison.
+See `fastaai1_5/methods/marker_sets.md` for the comparison.
 
 ## Database representation
 
@@ -518,7 +518,7 @@ interpretation of any results, but it's fixed nonetheless.
 120 Firmicutes genomes, all-vs-all, against FastAAI 1 driven through its own
 `aai_index` module.
 
-![v1 vs v1.5 concordance](fastaai2/methods/concordance_v1_v15.png)
+![v1 vs v1.5 concordance](fastaai1_5/methods/concordance_v1_v15.png)
 
 | | |
 |---|---|
@@ -527,7 +527,7 @@ interpretation of any results, but it's fixed nonetheless.
 | median \|Δ AAI\| | 0.0115 percentage points |
 | max \|Δ AAI\| | 0.0627 percentage points |
 
-See **[`fastaai2/methods/`](fastaai2/methods/)** for the data and the harness for this comparison.
+See **[`fastaai1_5/methods/`](fastaai1_5/methods/)** for the data and the harness for this comparison.
 
 **FastAAI 1 command lines still work.** `build_db`, `db_query`, `aai_index`,
 `single_query`, `multi_query` and `simple_query` are rerouted to the new verbs,
@@ -563,7 +563,7 @@ GPL-3.0-or-later - see [LICENSE](LICENSE). This is not only a preference:
 FastAAI 1.5 imports pyrodigal, which is GPL-3.0-or-later, so a compatible
 licence is required rather than chosen.
 
-The bundled HMMs in `fastaai2/python/fastaai/data/` are redistributed from
+The bundled HMMs in `fastaai1_5/python/fastaai/data/` are redistributed from
 FastAAI 1 under the MIT licence and keep their original notice; see the README
 beside them. FastAAI 1 itself remains at
 https://github.com/cruizperez/FastAAI.

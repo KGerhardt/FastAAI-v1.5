@@ -1,4 +1,4 @@
-"""FastAAI 2 — average amino acid identity from single-copy protein tetramers.
+"""FastAAI 1.5 — average amino acid identity from single-copy protein tetramers.
 
 Python owns FASTA ingestion, gene prediction and HMM search; the Rust extension
 owns k-merisation, the inverted index, counting and the AAI transform.

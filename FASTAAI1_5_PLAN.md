@@ -1,4 +1,4 @@
-# FastAAI 2 — Engine Design & Implementation Plan
+# FastAAI 1.5 — Engine Design & Implementation Plan
 
 Status: design draft, 2026-08-02
 Reference implementation under review: `FastAAI/fastaai/fastaai.py` (FastAAI 1, 4882 lines)
@@ -9,11 +9,11 @@ Reference implementation under review: `FastAAI/fastaai/fastaai.py` (FastAAI 1, 
 
 | path | what it is |
 |---|---|
-| `fastaai2/` | **the clean codebase.** Rust core + PyO3 + Python package, maturin build. Working end to end. |
+| `fastaai1_5/` | **the clean codebase.** Rust core + PyO3 + Python package, maturin build. Working end to end. |
 | `prototype/` | the measurement harness. Every benchmark behind a MEASURED section lives here; keep until the clean tree reproduces them. |
 | `FastAAI/` | upstream FastAAI 1, for reference and equivalence checking. |
 
-`fastaai2/` currently implements: dense k-merisation, the partition-local
+`fastaai1_5/` currently implements: dense k-merisation, the partition-local
 inverted index, the counting kernel, the AAI transform, pyfastx/pyrodigal/pyhmmer
 preprocessing, all three best-hit filter modes, and a CLI. 23 Rust + 32 Python
 tests pass. Not yet implemented: on-disk partition format, genome manifest, block
@@ -138,7 +138,7 @@ below inter-run variability in aggregate. Nothing more than that.
 >
 > The exception *is* the fallback signal. Success implies equivalence, so there is
 > no path where a pre-optimized profile silently behaves differently. This is not
-> a candidate source of v1/v2 divergence in the equivalence harness (§6), and the
+> a candidate source of v1/v1.5 divergence in the equivalence harness (§6), and the
 > author's note that it "doesn't seem to be improving performance" was measuring
 > the real thing, not a fallback.
 
@@ -208,7 +208,7 @@ index from (SCP, kmer) to the set of genomes carrying it, then counting genome-I
 occurrences to recover intersection cardinalities — is correct and is retained
 unchanged. This plan replaces its *implementation*.
 
-Two changes define v2:
+Two changes define v1.5:
 
 - **The counting engine moves to Rust.** Preprocessing stays in Python on
   pyrodigal/pyhmmer.
@@ -297,7 +297,7 @@ collection that carries domain labels, rather than compiled into the tool.
 
 `generate_accessions_index()` (`fastaai.py:1469`) hardcodes 122 Pfam accessions.
 `find_hmm()` (`1397`) locates a bundled `Complete_SCG_DB.hmm`. Both are removed
-in v2 (§3.2).
+in v1.5 (§3.2).
 
 ### 1.5 Hardcoded HMM thresholds
 
@@ -471,7 +471,7 @@ and target are runtime roles, not types.** A query database is built by running
 FASTA through the models extracted from the target database. All-vs-all is
 DB-vs-itself.
 
-This is what makes v2 SCP-agnostic: the target database is the sole authority for
+This is what makes v1.5 SCP-agnostic: the target database is the sole authority for
 model identity, model ordering, and search policy.
 
 ### 3.2 Model metadata table
@@ -509,7 +509,7 @@ v1 encodes tetramers as decimal concatenation of ASCII codes —
 ~160k real tetramers over a ~9×10⁷ sparse range and forcing a hash or B-tree
 lookup.
 
-v2 uses a dense ordinal encoding over the declared alphabet:
+v1.5 uses a dense ordinal encoding over the declared alphabet:
 
 ```
 id = ((a·|A| + b)·|A| + c)·|A| + d        # range [0, |A|^k)
@@ -1273,7 +1273,7 @@ extraction) consume blocks directly and never need the dense form.
 
 ## 6. Validation — DONE, and it found a bug on each side
 
-Run: `fastaai2/tests/equivalence_v1.py <v1_results_dir> <archive_dir>`.
+Run: `fastaai1_5/tests/equivalence_v1.py <v1_results_dir> <archive_dir>`.
 120 Firmicutes genomes spanning the collection, 14,400 pairs, v1 driven through
 its own `aai_index` module.
 
@@ -1296,7 +1296,7 @@ a tolerance.
 The right-hand column is the *measured* size of correcting v1's k-merizer bug:
 **mean 1.58×10⁻⁴, max 1.17×10⁻³ Jaccard, SCP sets untouched.**
 
-### 6.2 Bug found in FastAAI 2 — translation-table selection
+### 6.2 Bug found in FastAAI 1.5 — translation-table selection
 
 `predict_proteins` chose whichever genetic code gave higher coding density.
 Table 4 reassigns UGA from stop to tryptophan, so genes run through codons table
@@ -1352,9 +1352,9 @@ real tetramers — and **two unrelated genomes with N-runs share `XXXX`, scoring
 similarity from assembly gaps.** That is a false-positive mechanism, not just
 noise.
 
-FastAAI 2 treats both as out-of-alphabet: the k-mer window breaks rather than
+FastAAI 1.5 treats both as out-of-alphabet: the k-mer window breaks rather than
 aliasing onto a valid code (`kmer.rs::kmers`). So all three residual differences
-are **v1 being wrong and v2 being right**, which is why they are one-directional.
+are **v1 being wrong and v1.5 being right**, which is why they are one-directional.
 
 > Any tool reading v1 databases needs to know this: stored k-mer sets include
 > tetramers spanning stops and ambiguity codes.
@@ -1370,7 +1370,7 @@ that separates "validated" from "close enough".
 
 ## 7. Open questions
 
-1. **§1.2 best-hit filter order** — which semantics is canonical for v2? Blocks
+1. **§1.2 best-hit filter order** — which semantics is canonical for v1.5? Blocks
    the equivalence harness, since it determines expected divergence from v1.
 2. ~~**§1.3** — confirm `assign_domain`'s removal was intentional.~~ **Resolved:**
    it encodes a real finding (100% domain accuracy from proportional recovery) and

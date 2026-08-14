@@ -511,10 +511,21 @@ def _reroute(argv: list[str]) -> list[str]:
 
     def carried():
         out = []
-        for n in ("--threads", "--filter", "--output_style", "--limit", "--archive", "--hmm"):
+        for n in ("--threads", "--filter", "--output_style", "--limit", "--hmm"):
             v = opt(n)
             if v is not None:
                 out += [n, v]
+        # v1's --archive named where to keep the preprocessing store. v1.5 always
+        # writes one, and `--dir` names the root that holds it, so the flag
+        # translates. Carrying it through unchanged put a flag the new parser
+        # never defines into argv, and argparse rejected the whole command line
+        # — the one outcome the reroute exists to prevent.
+        archive = opt("--archive")
+        if archive is not None and opt("--dir") is None:
+            print(f"note: --archive is now --dir, the root holding proteins/, "
+                  f"hmm_hits/, crystals/ and database/; using --dir {archive}",
+                  file=sys.stderr)
+            out += ["--dir", archive]
         for n in ("--verbose", "--quiet", "--do_stdev", "--in_memory",
                   "--store_results", "--compress"):
             if n in rest:
@@ -523,9 +534,9 @@ def _reroute(argv: list[str]) -> list[str]:
 
     if opt("-m", "--hmms") or opt("-qh", "--query_hmms") or opt("-th", "--target_hmms"):
         raise SystemExit(
-            "precomputed HMMER tables (-m/-qh/-th) were an input in FastAAI 1. FastAAI 2 "
-            "does not read them; supply genomes or proteins, or reuse an --archive, which "
-            "stores raw hits and can be re-filtered without re-searching."
+            "precomputed HMMER tables (-m/-qh/-th) were an input in FastAAI 1. FastAAI 1.5 "
+            "does not read them; supply genomes or proteins, or reuse a stored run root, "
+            "which keeps raw hits and can be re-filtered without re-searching."
         )
 
     # Anything the translation does not consume would otherwise vanish, because
@@ -579,7 +590,7 @@ def _reroute(argv: list[str]) -> list[str]:
         # replacement is strictly better — but it is not a flag translation,
         # and silently doing something else would be worse than saying so.
         raise SystemExit(
-            "merge_db is not supported: FastAAI 2 does not merge sealed "
+            "merge_db is not supported: FastAAI 1.5 does not merge sealed "
             "databases.\n"
             "Merging kept each donor's partitioning, which fragments the index "
             "and costs search throughput.\n"
