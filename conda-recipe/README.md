@@ -7,8 +7,9 @@ Two recipes for the same package.
 | `meta.yaml` | `conda-build` | the bioconda submission form |
 | `recipe.yaml` | `rattler-build` | building locally, today |
 
-Both are unpublished. Authorship needs settling with collaborators before
-anything is submitted.
+`meta.yaml` is the form submitted to bioconda for 1.5.0. It builds from the
+release sdist, so it needs no working tree; `recipe.yaml` still builds from
+`../fastaai1_5` and is the one to use while developing.
 
 ## Build and install locally
 
@@ -52,10 +53,29 @@ builds the same recipe without complaint.
 
 `meta.yaml` is kept current anyway, because bioconda takes that form.
 
-## Before submitting
+## The 1.5.0 submission
 
-- **Authorship.** `pyproject.toml` lists Kenji Gerhardt alone; v1 credits four
-  people. Settle this first.
-- Replace `source: path:` with a `url` + `sha256` of a tagged release.
-- Restore `{{ compiler('rust') }}` in `meta.yaml`; it is spelled out here only
-  because a local build lacks conda-forge's pinning config.
+`meta.yaml` points at the **release sdist**, not the auto-generated tag
+tarball:
+
+```
+https://github.com/KGerhardt/FastAAI-v1.5/releases/download/1.5.0/fastaai-1.5.0.tar.gz
+```
+
+That distinction matters. The package lives in `fastaai1_5/`, one level down
+from the repo root, so GitHub's own tag tarball would put it a directory below
+where conda-build looks and the build script would have to descend into it. The
+sdist that `maturin sdist` produces from inside `fastaai1_5/` has the package at
+its root, which is why the recipe needs no `cd`. Build the asset with
+
+```sh
+cd fastaai1_5 && maturin sdist --out /some/dir
+```
+
+and attach that exact file to the release — `maturin sdist` is not
+byte-reproducible across runs, so the `sha256` in the recipe is the hash of the
+uploaded artifact, not of a rebuild.
+
+To verify a submission before opening the pull request, copy `recipe.yaml`,
+swap its `source: path:` for the same `url` + `sha256`, and build that. Done for
+1.5.0: it builds and every test command passes.

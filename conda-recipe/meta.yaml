@@ -6,10 +6,12 @@ package:
   version: {{ version }}
 
 source:
-  # Local build, for testing an install before anything is published. A
-  # submitted bioconda recipe replaces this with a url + sha256 of a release
-  # tarball; nothing else here needs to change.
-  path: ../fastaai1_5
+  # The 1.5.0 release asset is the maturin sdist of `fastaai1_5/`, so the
+  # package sits at the root of this tarball. The repo's own auto-generated
+  # tag tarball would not: it carries the whole checkout, package one level
+  # down, and would need the build script to descend into it.
+  url: https://github.com/KGerhardt/FastAAI-v1.5/releases/download/{{ version }}/{{ name }}-{{ version }}.tar.gz
+  sha256: 591c74ab301919216e26b051a4ca7434f895514ab4feba2729d1f47470c33d09
 
 build:
   number: 0
@@ -19,10 +21,10 @@ build:
 
 requirements:
   build:
-    # Named directly rather than via {{ compiler('rust') }}: the compiler jinja
-    # needs conda-forge's pinning config, which a local build does not have. A
-    # submitted recipe should use the jinja form.
-    - rust >=1.70
+    # The C compiler is here for the linker pyo3's cdylib needs, not to compile
+    # any C of ours.
+    - {{ compiler('c') }}
+    - {{ compiler('rust') }}
   host:
     # Bare `python`: conda-build injects the variant's own pin here, and a
     # `>=3.9` alongside it concatenates into an invalid spec. The floor is
@@ -40,8 +42,6 @@ requirements:
 test:
   imports:
     - fastaai
-  requires:
-    - pytest
   commands:
     # The CLI resolves, and FastAAI 1 command lines still reach it.
     - fastaai --help
